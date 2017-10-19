@@ -5,11 +5,15 @@
 #include <vespa/storage/persistence/messages.h>
 #include <vespa/vdstestlib/cppunit/macros.h>
 #include <vespa/storageapi/message/multioperation.h>
+#include <vespa/persistence/spi/test.h>
 #include <vespa/persistence/dummyimpl/dummypersistence.h>
 #include <tests/persistence/persistencetestutils.h>
+#include <tests/common/make_document_bucket.h>
 
 using document::DocumentTypeRepo;
 using document::TestDocRepo;
+using storage::spi::test::makeBucket;
+using storage::test::makeDocumentBucket;
 
 namespace storage {
 
@@ -30,7 +34,7 @@ public:
         spi::Context context(spi::LoadType(0, "default"), spi::Priority(0),
                              spi::Trace::TraceLevel(0));
         getPersistenceProvider().createBucket(
-                spi::Bucket(document::BucketId(16, 4), spi::PartitionId(0)),
+                makeBucket(document::BucketId(16, 4)),
                 context);
     }
 
@@ -60,7 +64,7 @@ LegacyOperationHandlerTest::testMultioperationSingleBodyPut()
     vdslib::WritableDocumentList block(getTypeRepo(), &buffer[0], buffer.size());
     block.addPut(*doc, api::Timestamp(1234));
 
-    api::MultiOperationCommand cmd(getTypeRepo(), bucketId, 0);
+    api::MultiOperationCommand cmd(getTypeRepo(), makeDocumentBucket(bucketId), 0);
     cmd.setOperations(block);
 
     thread->handleMultiOperation(cmd);
@@ -81,7 +85,7 @@ LegacyOperationHandlerTest::testMultioperationSingleRemove()
     vdslib::WritableDocumentList block(getTypeRepo(), &buffer[0], buffer.size());
     block.addRemove(doc->getId(), spi::Timestamp(1235));
 
-    api::MultiOperationCommand cmd(getTypeRepo(), bucketId, 0);
+    api::MultiOperationCommand cmd(getTypeRepo(), makeDocumentBucket(bucketId), 0);
     cmd.setOperations(block);
 
     thread->handleMultiOperation(cmd);
@@ -108,7 +112,7 @@ LegacyOperationHandlerTest::testMultioperationSingleUpdate()
     vdslib::WritableDocumentList block(getTypeRepo(), &buffer[0], buffer.size());
     block.addUpdate(*update, api::Timestamp(1235));
 
-    api::MultiOperationCommand cmd(getTypeRepo(), bucketId, 0);
+    api::MultiOperationCommand cmd(getTypeRepo(), makeDocumentBucket(bucketId), 0);
     cmd.setOperations(block);
 
     thread->handleMultiOperation(cmd);
@@ -133,7 +137,7 @@ LegacyOperationHandlerTest::testMultioperationUpdateNotFound()
     vdslib::WritableDocumentList block(getTypeRepo(), &buffer[0], buffer.size());
     block.addUpdate(*update, api::Timestamp(1235));
 
-    api::MultiOperationCommand cmd(getTypeRepo(), bucketId, 0);
+    api::MultiOperationCommand cmd(getTypeRepo(), makeDocumentBucket(bucketId), 0);
     cmd.setOperations(block);
 
     thread->handleMultiOperation(cmd);
@@ -169,7 +173,7 @@ LegacyOperationHandlerTest::testMultioperationMixedOperations()
                     api::Timestamp(4568));
     block.addPut(*putDoc, api::Timestamp(5678));
 
-    api::MultiOperationCommand cmd(getTypeRepo(), bucketId, 0);
+    api::MultiOperationCommand cmd(getTypeRepo(), makeDocumentBucket(bucketId), 0);
     cmd.setOperations(block);
 
     thread->handleMultiOperation(cmd);

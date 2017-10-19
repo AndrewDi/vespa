@@ -22,7 +22,7 @@ DiskMoveOperationHandler::handleBucketDiskMove(BucketDiskMoveCommand& cmd,
                                        _env._metrics.movedBuckets,
                                        _env._component.getClock()));
 
-    document::BucketId bucket(cmd.getBucketId());
+    document::Bucket bucket(cmd.getBucket());
     uint32_t targetDisk(cmd.getDstDisk());
     uint32_t deviceIndex(_env._partition);
 
@@ -66,13 +66,13 @@ DiskMoveOperationHandler::handleBucketDiskMove(BucketDiskMoveCommand& cmd,
         // is executed. moving queue should move delete command to correct disk
         StorBucketDatabase::WrappedEntry entry(
                 _env.getBucketDatabase().get(
-                    bucket, "FileStorThread::onBucketDiskMove",
+                    bucket.getBucketId(), "FileStorThread::onBucketDiskMove",
                     StorBucketDatabase::LOCK_IF_NONEXISTING_AND_NOT_CREATING));
 
         // Move queued operations in bucket to new thread. Hold bucket lock
         // while doing it, so filestor manager can't put in other operations
         // first, such that operations change order.
-        _env._fileStorHandler.remapQueueAfterDiskMove(bucket, deviceIndex, targetDisk);
+        _env._fileStorHandler.remapQueueAfterDiskMove(bucket.getBucketId(), deviceIndex, targetDisk);
 
         if (entry.exist()) {
             entry->setBucketInfo(bInfo);

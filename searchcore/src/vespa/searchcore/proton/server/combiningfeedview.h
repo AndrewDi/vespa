@@ -16,8 +16,7 @@
 #include "replaypacketdispatcher.h"
 #include "ibucketstatecalculator.h"
 
-namespace proton
-{
+namespace proton {
 
 
 class CombiningFeedView : public IFeedView
@@ -29,6 +28,7 @@ private:
     IBucketStateCalculator::SP                    _calc;
     bool                                          _clusterUp;
     bool                                          _forceReady;
+    document::BucketSpace                         _bucketSpace;
 
     const ISimpleDocumentMetaStore * getDocumentMetaStorePtr() const override;
 
@@ -59,9 +59,10 @@ public:
     typedef std::shared_ptr<CombiningFeedView> SP;
 
     CombiningFeedView(const std::vector<IFeedView::SP> &views,
+                      document::BucketSpace bucketSpace,
                       const IBucketStateCalculator::SP &calc);
 
-    virtual ~CombiningFeedView();
+    ~CombiningFeedView() override;
 
     const document::DocumentTypeRepo::SP & getDocumentTypeRepo() const override;
 
@@ -70,11 +71,11 @@ public:
      */
 
     void preparePut(PutOperation &putOp) override;
-    void handlePut(FeedToken *token, const PutOperation &putOp) override;
+    void handlePut(FeedToken token, const PutOperation &putOp) override;
     void prepareUpdate(UpdateOperation &updOp) override;
-    void handleUpdate(FeedToken *token, const UpdateOperation &updOp) override;
+    void handleUpdate(FeedToken token, const UpdateOperation &updOp) override;
     void prepareRemove(RemoveOperation &rmOp) override;
-    void handleRemove(FeedToken *token, const RemoveOperation &rmOp) override;
+    void handleRemove(FeedToken token, const RemoveOperation &rmOp) override;
     void prepareDeleteBucket(DeleteBucketOperation &delOp) override;
     void handleDeleteBucket(const DeleteBucketOperation &delOp) override;
     void prepareMove(MoveOperation &putOp) override;

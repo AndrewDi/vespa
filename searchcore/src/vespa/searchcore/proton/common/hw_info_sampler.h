@@ -16,16 +16,28 @@ class HwInfoSampler
 {
 public:
     struct Config {
-        double _diskWriteSpeedOverride;
-        double _slowWriteSpeedLimit;
-        uint64_t _diskSampleWriteSize;
+        uint64_t diskSizeBytes;
+        double diskWriteSpeedOverride;
+        double slowWriteSpeedLimit;
+        uint64_t diskSampleWriteSize;
+        bool diskShared;
+        uint64_t memorySizeBytes;
+        uint32_t cpuCores;
 
-        Config(double diskWriteSpeedOverride,
-               double slowWriteSpeedLimit,
-               double diskSampleWriteSize)
-            : _diskWriteSpeedOverride(diskWriteSpeedOverride),
-              _slowWriteSpeedLimit(slowWriteSpeedLimit),
-              _diskSampleWriteSize(diskSampleWriteSize)
+        Config(uint64_t diskSizeBytes_,
+               double diskWriteSpeedOverride_,
+               double slowWriteSpeedLimit_,
+               double diskSampleWriteSize_,
+               bool diskShared_,
+               uint64_t memorySizeBytes_,
+               uint32_t cpuCores_)
+            : diskSizeBytes(diskSizeBytes_),
+              diskWriteSpeedOverride(diskWriteSpeedOverride_),
+              slowWriteSpeedLimit(slowWriteSpeedLimit_),
+              diskSampleWriteSize(diskSampleWriteSize_),
+              diskShared(diskShared_),
+              memorySizeBytes(memorySizeBytes_),
+              cpuCores(cpuCores_)
         {
         }
     };
@@ -36,8 +48,9 @@ private:
     Clock::time_point _sampleTime;
     double _diskWriteSpeed;
 
-    void setup(const Config &config);
-    void sample(const vespalib::string &path, const Config &config);
+    void setup(const HwInfo::Disk &disk, const HwInfo::Memory &memory, const HwInfo::Cpu &cpu);
+    void setDiskWriteSpeed(const vespalib::string &path, const Config &config);
+    void sampleDiskWriteSpeed(const vespalib::string &path, const Config &config);
 public:
     HwInfoSampler(const vespalib::string &path, const Config &config);
     ~HwInfoSampler();

@@ -4,8 +4,8 @@ package com.yahoo.vespa.hosted.controller.integration;
 import com.yahoo.config.provision.ApplicationId;
 import com.yahoo.config.provision.Zone;
 
-import java.util.Collections;
-import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * @author bratseth
@@ -23,10 +23,11 @@ public class MockMetricsService implements com.yahoo.vespa.hosted.controller.api
     }
 
     @Override
-    public List<ClusterCostMetrics> getClusterCostMetrics(ApplicationId application, Zone zone) {
-        CostMetrics costMetrics = new CostMetrics(55.54, 69.90, 34.59);
-        ClusterCostMetrics clusterCostMetrics = new ClusterCostMetrics("default", costMetrics);
-        return Collections.singletonList(clusterCostMetrics);
+    public Map<String, SystemMetrics> getSystemMetrics(ApplicationId application, Zone zone) {
+        Map<String, SystemMetrics> result = new HashMap<>();
+        SystemMetrics system = new SystemMetrics(55.54, 69.90, 34.59);
+        result.put("default", system);
+        return result;
     }
 
 }

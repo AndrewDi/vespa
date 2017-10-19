@@ -97,6 +97,7 @@ vespa_define_module(
     src/tests/proton/documentdb/maintenancecontroller
     src/tests/proton/documentdb/move_operation_limiter
     src/tests/proton/documentdb/storeonlyfeedview
+    src/tests/proton/documentdb/threading_service_config
     src/tests/proton/documentmetastore
     src/tests/proton/documentmetastore/lidreusedelayer
     src/tests/proton/feed_and_search
@@ -122,6 +123,7 @@ vespa_define_module(
     src/tests/proton/metrics/metrics_engine
     src/tests/proton/persistenceconformance
     src/tests/proton/persistenceengine
+    src/tests/proton/persistenceengine/persistence_handler_map
     src/tests/proton/proton
     src/tests/proton/proton_config_fetcher
     src/tests/proton/proton_configurer

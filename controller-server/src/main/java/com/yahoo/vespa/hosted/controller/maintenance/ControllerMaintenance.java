@@ -9,6 +9,7 @@ import com.yahoo.vespa.hosted.controller.api.integration.Issues;
 import com.yahoo.vespa.hosted.controller.api.integration.Properties;
 import com.yahoo.vespa.hosted.controller.api.integration.chef.Chef;
 import com.yahoo.vespa.hosted.controller.maintenance.config.MaintainerConfig;
+import com.yahoo.vespa.hosted.controller.persistence.CuratorDb;
 
 import java.time.Duration;
 
@@ -31,9 +32,13 @@ public class ControllerMaintenance extends AbstractComponent {
     private final VersionStatusUpdater versionStatusUpdater;
     private final Upgrader upgrader;
     private final DelayedDeployer delayedDeployer;
+    private final BlockedChangeDeployer blockedChangeDeployer;
+    private final ClusterInfoMaintainer clusterInfoMaintainer;
+    private final ClusterUtilizationMaintainer clusterUtilizationMaintainer;
+    private final DeploymentMetricsMaintainer deploymentMetricsMaintainer;
 
     @SuppressWarnings("unused") // instantiated by Dependency Injection
-    public ControllerMaintenance(MaintainerConfig maintainerConfig, Controller controller,
+    public ControllerMaintenance(MaintainerConfig maintainerConfig, Controller controller, CuratorDb curator,
                                  JobControl jobControl, Metric metric, Chef chefClient,
                                  Contacts contactsClient, Properties propertiesClient, Issues issuesClient) {
         Duration maintenanceInterval = Duration.ofMinutes(maintainerConfig.intervalMinutes());
@@ -45,9 +50,15 @@ public class ControllerMaintenance extends AbstractComponent {
         failureRedeployer = new FailureRedeployer(controller, maintenanceInterval, jobControl);
         outstandingChangeDeployer = new OutstandingChangeDeployer(controller, maintenanceInterval, jobControl);
         versionStatusUpdater = new VersionStatusUpdater(controller, Duration.ofMinutes(3), jobControl);
-        upgrader = new Upgrader(controller, maintenanceInterval, jobControl);
+        upgrader = new Upgrader(controller, maintenanceInterval, jobControl, curator);
         delayedDeployer = new DelayedDeployer(controller, maintenanceInterval, jobControl);
+        blockedChangeDeployer = new BlockedChangeDeployer(controller, maintenanceInterval, jobControl);
+        clusterInfoMaintainer = new ClusterInfoMaintainer(controller, Duration.ofHours(2), jobControl);
+        clusterUtilizationMaintainer = new ClusterUtilizationMaintainer(controller, Duration.ofHours(2), jobControl);
+        deploymentMetricsMaintainer = new DeploymentMetricsMaintainer(controller, Duration.ofMinutes(10), jobControl);
     }
+
+    public Upgrader upgrader() { return upgrader; }
     
     /** Returns control of the maintenance jobs of this */
     public JobControl jobControl() { return jobControl; }
@@ -62,6 +73,10 @@ public class ControllerMaintenance extends AbstractComponent {
         versionStatusUpdater.deconstruct();
         upgrader.deconstruct();
         delayedDeployer.deconstruct();
+        blockedChangeDeployer.deconstruct();
+        clusterUtilizationMaintainer.deconstruct();
+        clusterInfoMaintainer.deconstruct();
+        deploymentMetricsMaintainer.deconstruct();
     }
 
 }

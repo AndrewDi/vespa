@@ -10,6 +10,7 @@
 #include "lid_space_compaction_handler.h"
 #include "maintenance_jobs_injector.h"
 #include "reconfig_params.h"
+#include "bootstrapconfig.h"
 #include <vespa/searchcore/proton/attribute/attribute_writer.h>
 #include <vespa/searchcore/proton/attribute/imported_attributes_repo.h>
 #include <vespa/searchcore/proton/common/eventlogger.h>
@@ -42,8 +43,6 @@ using vespalib::Executor;
 using vespalib::IllegalStateException;
 using vespalib::StateExplorer;
 using vespalib::make_string;
-using vespalib::makeTask;
-using vespalib::makeClosure;
 using namespace proton::matching;
 using namespace search;
 using namespace search::engine;
@@ -62,16 +61,7 @@ using searchcorespi::IFlushTarget;
 namespace proton {
 
 namespace {
-
 constexpr uint32_t indexing_thread_stack_size = 128 * 1024;
-
-uint32_t semiUnboundTaskLimit(uint32_t semiUnboundExecutorTaskLimit,
-                              uint32_t indexingThreads)
-{
-    uint32_t taskLimit = semiUnboundExecutorTaskLimit / indexingThreads;
-    return taskLimit;
-}
-
 }
 
 template <typename FunctionType>
@@ -81,16 +71,17 @@ DocumentDB::masterExecute(FunctionType &&function) {
 }
 
 DocumentDB::DocumentDB(const vespalib::string &baseDir,
-                       const DocumentDBConfig::SP & configSnapshot,
+                       const DocumentDBConfig::SP &configSnapshot,
                        const vespalib::string &tlsSpec,
-                       matching::QueryLimiter & queryLimiter,
+                       matching::QueryLimiter &queryLimiter,
                        const vespalib::Clock &clock,
                        const DocTypeName &docTypeName,
+                       document::BucketSpace bucketSpace,
                        const ProtonConfig &protonCfg,
-                       IDocumentDBOwner & owner,
-                       vespalib::ThreadExecutor & warmupExecutor,
-                       vespalib::ThreadStackExecutorBase & summaryExecutor,
-                       search::transactionlog::Writer * tlsDirectWriter,
+                       IDocumentDBOwner &owner,
+                       vespalib::ThreadExecutor &warmupExecutor,
+                       vespalib::ThreadStackExecutorBase &summaryExecutor,
+                       search::transactionlog::Writer &tlsDirectWriter,
                        MetricsWireService &metricsWireService,
                        const FileHeaderContext &fileHeaderContext,
                        ConfigStore::UP config_store,
@@ -103,14 +94,13 @@ DocumentDB::DocumentDB(const vespalib::string &baseDir,
       IClusterStateChangedHandler(),
       search::transactionlog::SyncProxy(),
       _docTypeName(docTypeName),
+      _bucketSpace(bucketSpace),
       _baseDir(baseDir + "/" + _docTypeName.toString()),
       // Only one thread per executor, or performDropFeedView() will fail.
-      _defaultExecutorTaskLimit(protonCfg.indexing.tasklimit),
-      _semiUnboundExecutorTaskLimit(protonCfg.indexing.semiunboundtasklimit),
-      _indexingThreads(protonCfg.indexing.threads),
-      _writeService(std::max(1, protonCfg.indexing.threads),
+      _writeServiceConfig(ThreadingServiceConfig::make(protonCfg, hwInfo.cpu())),
+      _writeService(_writeServiceConfig.indexingThreads(),
                     indexing_thread_stack_size,
-                    _defaultExecutorTaskLimit),
+                    _writeServiceConfig.defaultTaskLimit()),
       _initializeThreads(initializeThreads),
       _initConfigSnapshot(),
       _initConfigSerialNum(0u),
@@ -123,7 +113,6 @@ DocumentDB::DocumentDB(const vespalib::string &baseDir,
       _initGate(),
       _clusterStateHandler(_writeService.master()),
       _bucketHandler(_writeService.master()),
-      _protonSummaryCfg(protonCfg.summary),
       _protonIndexCfg(protonCfg.index),
       _config_store(std::move(config_store)),
       _sessionManager(new matching::SessionManager(protonCfg.grouping.sessionmanager.maxentries)),
@@ -136,31 +125,10 @@ DocumentDB::DocumentDB(const vespalib::string &baseDir,
       _state(),
       _dmUsageForwarder(_writeService.master()),
       _writeFilter(),
-      _feedHandler(_writeService,
-                   tlsSpec,
-                   docTypeName,
-                   getMetricsCollection().getLegacyMetrics().feed,
-                   _state,
-                   *this,
-                   _writeFilter,
-                   *this,
-                   tlsDirectWriter),
-      _subDBs(*this,
-              *this,
-              _feedHandler,
-              _docTypeName,
-              _writeService,
-              warmupExecutor,
-              summaryExecutor,
-              fileHeaderContext,
-              metricsWireService,
-              getMetricsCollection(),
-              queryLimiter,
-              clock,
-              _configMutex,
-              _baseDir,
-              protonCfg,
-              hwInfo),
+      _feedHandler(_writeService, tlsSpec, docTypeName, _state, *this, _writeFilter, *this, tlsDirectWriter),
+      _subDBs(*this, *this, _feedHandler, _docTypeName, _writeService, warmupExecutor,
+              summaryExecutor, fileHeaderContext, metricsWireService, getMetricsCollection(),
+              queryLimiter, clock, _configMutex, _baseDir, protonCfg, hwInfo),
       _maintenanceController(_writeService.master(), summaryExecutor, _docTypeName),
       _visibility(_feedHandler, _writeService, _feedView),
       _lidSpaceCompactionHandlers(),
@@ -168,7 +136,7 @@ DocumentDB::DocumentDB(const vespalib::string &baseDir,
       _lastDocStoreCacheStats(),
       _calc()
 {
-    assert(configSnapshot.get() != NULL);
+    assert(configSnapshot);
 
     LOG(debug, "DocumentDB(%s): Creating database in directory '%s'",
         _docTypeName.toString().c_str(), _baseDir.c_str());
@@ -200,7 +168,7 @@ DocumentDB::DocumentDB(const vespalib::string &baseDir,
     fastos::TimeStamp visibilityDelay = loaded_config->getMaintenanceConfigSP()->getVisibilityDelay();
     _visibility.setVisibilityDelay(visibilityDelay);
     if (_visibility.getVisibilityDelay() > 0) {
-        _writeService.setTaskLimit(semiUnboundTaskLimit(_semiUnboundExecutorTaskLimit, _indexingThreads));
+        _writeService.setTaskLimit(_writeServiceConfig.semiUnboundTaskLimit());
     }
 }
 
@@ -239,8 +207,7 @@ void
 DocumentDB::internalInit()
 {
     (void) _state.enterLoadState();
-    _writeService.master().execute(makeTask(makeClosure(this,
-                                           &DocumentDB::initManagers)));
+    masterExecute([this]() { initManagers(); });
 }
 
 class InitDoneTask : public vespalib::Executor::Task {
@@ -277,8 +244,7 @@ DocumentDB::initManagers()
     DocumentDBConfig::SP configSnapshot(_initConfigSnapshot);
     _initConfigSnapshot.reset();
     InitializerTask::SP rootTask =
-        _subDBs.createInitializer(*configSnapshot, _initConfigSerialNum,
-                                  _protonSummaryCfg, _protonIndexCfg);
+        _subDBs.createInitializer(*configSnapshot, _initConfigSerialNum, _protonIndexCfg);
     InitializeThreads initializeThreads = _initializeThreads;
     _initializeThreads.reset();
     std::shared_ptr<TaskRunner> taskRunner(std::make_shared<TaskRunner>(*initializeThreads));
@@ -309,7 +275,7 @@ DocumentDB::newConfigSnapshot(DocumentDBConfig::SP snapshot)
     _pendingConfigSnapshot.set(snapshot);
     {
         lock_guard guard(_configMutex);
-        if (_activeConfigSnapshot.get() == NULL) {
+        if ( ! _activeConfigSnapshot) {
             LOG(debug,
                 "DocumentDB(%s): Ignoring new available config snapshot. "
                 "The document database does not have"
@@ -325,9 +291,7 @@ DocumentDB::newConfigSnapshot(DocumentDBConfig::SP snapshot)
             return;
         }
     }
-    _writeService.master().execute(makeTask(makeClosure(this,
-                                           &DocumentDB::performReconfig,
-                                           _pendingConfigSnapshot.get())));
+    masterExecute([this] () { performReconfig(_pendingConfigSnapshot.get()); } );
 }
 
 
@@ -343,7 +307,7 @@ DocumentDB::enterReprocessState()
     if (!runner.empty()) {
         runner.run();
         NoopOperation op;
-        _feedHandler.storeOperation(op);
+        _feedHandler.storeOperationSync(op);
         sync(op.getSerialNum());
         _subDBs.pruneRemovedFields(op.getSerialNum());
     }
@@ -370,7 +334,7 @@ void
 DocumentDB::performReconfig(DocumentDBConfig::SP configSnapshot)
 {
     // Called by executor thread
-    applyConfig(configSnapshot, getCurrentSerialNumber());
+    applyConfig(std::move(configSnapshot), getCurrentSerialNumber());
     if (_state.getState() == DDBState::State::APPLY_LIVE_CONFIG) {
         enterReprocessState();
     }
@@ -378,7 +342,8 @@ DocumentDB::performReconfig(DocumentDBConfig::SP configSnapshot)
 
 
 void
-DocumentDB::applySubDBConfig(const DocumentDBConfig &newConfigSnapshot, SerialNum serialNum, const ReconfigParams &params)
+DocumentDB::applySubDBConfig(const DocumentDBConfig &newConfigSnapshot,
+                             SerialNum serialNum, const ReconfigParams &params)
 {
     auto registry = _owner.getDocumentDBReferenceRegistry();
     auto oldRepo = _activeConfigSnapshot->getDocumentTypeRepoSP();
@@ -387,18 +352,13 @@ DocumentDB::applySubDBConfig(const DocumentDBConfig &newConfigSnapshot, SerialNu
     auto newRepo = newConfigSnapshot.getDocumentTypeRepoSP();
     auto newDocType = newRepo->getDocumentType(_docTypeName.getName());
     assert(newDocType != nullptr);
-    DocumentDBReferenceResolver resolver(*registry,
-                                         *newDocType,
-                                         newConfigSnapshot.getImportedFieldsConfig(),
-                                         *oldDocType,
-                                         _refCount,
-                                         _writeService.attributeFieldWriter());
+    DocumentDBReferenceResolver resolver(*registry, *newDocType, newConfigSnapshot.getImportedFieldsConfig(),
+                                         *oldDocType, _refCount, _writeService.attributeFieldWriter());
     _subDBs.applyConfig(newConfigSnapshot, *_activeConfigSnapshot, serialNum, params, resolver);
 }
 
 void
-DocumentDB::applyConfig(DocumentDBConfig::SP configSnapshot,
-                        SerialNum serialNum)
+DocumentDB::applyConfig(DocumentDBConfig::SP configSnapshot, SerialNum serialNum)
 {
     // Always called by executor thread:
     // Called by performReconfig() by executor thread during normal
@@ -437,25 +397,23 @@ DocumentDB::applyConfig(DocumentDBConfig::SP configSnapshot,
         _config_store->saveConfig(*configSnapshot, serialNum);
         // save entry in transaction log
         NewConfigOperation op(serialNum, *_config_store);
-        _feedHandler.storeOperation(op);
+        _feedHandler.storeOperationSync(op);
         sync(op.getSerialNum());
     }
     bool hasVisibilityDelayChanged = false;
     {
         bool elidedConfigSave = equalReplayConfig && tlsReplayDone;
         // Flush changes to attributes and memory index, cf. visibilityDelay
-        _feedView.get()->forceCommit(elidedConfigSave ? serialNum :
-                                     serialNum - 1);
+        _feedView.get()->forceCommit(elidedConfigSave ? serialNum : serialNum - 1);
         _writeService.sync();
-        fastos::TimeStamp visibilityDelay =
-            configSnapshot->getMaintenanceConfigSP()->getVisibilityDelay();
+        fastos::TimeStamp visibilityDelay = configSnapshot->getMaintenanceConfigSP()->getVisibilityDelay();
         hasVisibilityDelayChanged = (visibilityDelay != _visibility.getVisibilityDelay());
         _visibility.setVisibilityDelay(visibilityDelay);
     }
     if (_visibility.getVisibilityDelay() > 0) {
-        _writeService.setTaskLimit(semiUnboundTaskLimit(_semiUnboundExecutorTaskLimit, _indexingThreads));
+        _writeService.setTaskLimit(_writeServiceConfig.semiUnboundTaskLimit());
     } else {
-        _writeService.setTaskLimit(_defaultExecutorTaskLimit);
+        _writeService.setTaskLimit(_writeServiceConfig.defaultTaskLimit());
     }
     if (params.shouldSubDbsChange() || hasVisibilityDelayChanged) {
         applySubDBConfig(*configSnapshot, serialNum, params);
@@ -482,8 +440,7 @@ DocumentDB::applyConfig(DocumentDBConfig::SP configSnapshot,
     if (params.shouldMaintenanceControllerChange()) {
         forwardMaintenanceConfig();
     }
-    _writeFilter.setConfig(configSnapshot->getMaintenanceConfigSP()->
-                           getAttributeUsageFilterConfig());
+    _writeFilter.setConfig(configSnapshot->getMaintenanceConfigSP()->getAttributeUsageFilterConfig());
     if (_subDBs.getReprocessingRunner().empty()) {
         _subDBs.pruneRemovedFields(serialNum);
     }
@@ -508,10 +465,7 @@ DocumentDB::performDropFeedView(IFeedView::SP feedView)
     _writeService.summary().sync();
 
     // Feed view is kept alive in the closure's shared ptr.
-    _writeService.index().execute(makeTask(makeClosure(this,
-                                                &proton::DocumentDB::
-                                                performDropFeedView2,
-                                                feedView)));
+    _writeService.index().execute(makeLambdaTask([this, feedView] () { performDropFeedView2(feedView); }));
 }
 
 
@@ -524,7 +478,7 @@ DocumentDB::performDropFeedView2(IFeedView::SP feedView)
     _writeService.indexFieldWriter().sync();
 
     // Feed view is kept alive in the closure's shared ptr.
-    _writeService.master().execute(makeTask(makeClosure(&doNothing, feedView)));
+    masterExecute([feedView] () { doNothing(feedView); });
 }
 
 
@@ -572,7 +526,7 @@ DocumentDB::close()
     _metricsWireService.cleanAttributes(ready, &legacyMetrics.attributes);
     _metricsWireService.cleanAttributes(notReady, NULL);
     _writeService.sync();
-    _writeService.master().execute(makeTask(makeClosure(this, &DocumentDB::closeSubDBs)));
+    masterExecute([this] () { closeSubDBs(); } );
     _writeService.sync();
     // What about queued tasks ?
     _writeService.shutdown();
@@ -630,7 +584,7 @@ DocumentDB::saveInitialConfig(const DocumentDBConfig &configSnapshot)
     // pruned at once anyway.
     // save noop entry in transaction log
     NoopOperation op;
-    _feedHandler.storeOperation(op);
+    _feedHandler.storeOperationSync(op);
     sync(op.getSerialNum());
     // Wipe everything in transaction log before initial config.
     try {
@@ -654,7 +608,7 @@ DocumentDB::resumeSaveConfig()
     SerialNum confSerial = _feedHandler.incSerialNum();
     // resume operation, i.e. save config entry in transaction log
     NewConfigOperation op(confSerial, *_config_store);
-    _feedHandler.storeOperation(op);
+    _feedHandler.storeOperationSync(op);
     sync(op.getSerialNum());
 }
 
@@ -821,7 +775,7 @@ DocumentDB::enterRedoReprocessState()
         runner.run();
         _subDBs.onReprocessDone(_feedHandler.getSerialNum());
         NoopOperation op;
-        _feedHandler.storeOperation(op);
+        _feedHandler.storeOperationSync(op);
         sync(op.getSerialNum());
         _subDBs.pruneRemovedFields(op.getSerialNum());
     }
@@ -838,9 +792,7 @@ DocumentDB::enterApplyLiveConfigState()
         lock_guard guard(_configMutex);
         (void) _state.enterApplyLiveConfigState();
     }
-    _writeService.master().execute(makeTask(makeClosure(this,
-                                           &DocumentDB::performReconfig,
-                                           _pendingConfigSnapshot.get())));
+    masterExecute([this]() { performReconfig(_pendingConfigSnapshot.get()); });
 }
 
 
@@ -893,11 +845,9 @@ DocumentDB::replayConfig(search::SerialNum serialNum)
         return;
     }
     // Load config to replay
-    _config_store->loadConfig(*configSnapshot, serialNum,
-                            configSnapshot);
+    _config_store->loadConfig(*configSnapshot, serialNum, configSnapshot);
     // Grab relevant parts from pending config
-    configSnapshot = DocumentDBConfigScout::scout(configSnapshot,
-                                                 *_pendingConfigSnapshot.get());
+    configSnapshot = DocumentDBConfigScout::scout(configSnapshot, *_pendingConfigSnapshot.get());
     // Ignore configs that are not relevant during replay of transaction log
     configSnapshot = DocumentDBConfig::makeReplayConfig(configSnapshot);
     applyConfig(configSnapshot, serialNum);
@@ -950,6 +900,7 @@ DocumentDB::injectMaintenanceJobs(const DocumentDBMaintenanceConfig &config)
             _maintenanceController, // IFrozenBucketHandler
             _subDBs.getBucketCreateNotifier(),
             _docTypeName.getName(),
+            _bucketSpace,
             _feedHandler, // IPruneRemovedDocumentsHandler
             _feedHandler, // IDocumentMoveHandler
             _clusterStateHandler, // IBucketModifiedHandler
@@ -1344,6 +1295,18 @@ void
 DocumentDB::waitForOnlineState()
 {
     _state.waitForOnlineState();
+}
+
+vespalib::string
+DocumentDB::getName() const
+{
+    return _docTypeName.getName();
+}
+
+document::BucketSpace
+DocumentDB::getBucketSpace() const
+{
+    return _bucketSpace;
 }
 
 uint32_t

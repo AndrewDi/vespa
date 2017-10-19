@@ -1,0 +1,7 @@
+namespace=cloud.config
+
+# only splunk type config for now
+
+deploymentServer string default=""
+clientName string default=""
+splunkHome string default="/opt/splunkforwarder"

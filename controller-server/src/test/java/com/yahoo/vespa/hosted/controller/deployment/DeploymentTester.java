@@ -22,8 +22,10 @@ import com.yahoo.vespa.hosted.controller.maintenance.Upgrader;
 import com.yahoo.vespa.hosted.controller.versions.VersionStatus;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -37,6 +39,9 @@ import static org.junit.Assert.assertTrue;
  */
 public class DeploymentTester {
 
+    // Set a long interval so that maintainers never do scheduled runs during tests
+    private static final Duration maintenanceInterval = Duration.ofDays(1);
+
     private final ControllerTester tester;
     private final Upgrader upgrader;
     private final FailureRedeployer failureRedeployer;
@@ -47,10 +52,10 @@ public class DeploymentTester {
 
     public DeploymentTester(ControllerTester tester) {
         this.tester = tester;
-        this.upgrader = new Upgrader(tester.controller(), Duration.ofMinutes(2),
-                                     new JobControl(tester.curator()));
-        this.failureRedeployer = new FailureRedeployer(tester.controller(),
-                                                       Duration.ofMinutes(2),
+        tester.curator().writeUpgradesPerMinute(100);
+        this.upgrader = new Upgrader(tester.controller(), maintenanceInterval, new JobControl(tester.curator()),
+                                     tester.curator());
+        this.failureRedeployer = new FailureRedeployer(tester.controller(), maintenanceInterval,
                                                        new JobControl(tester.curator()));
     }
 
@@ -85,12 +90,17 @@ public class DeploymentTester {
                 .filter(c -> c instanceof Change.VersionChange)
                 .map(Change.VersionChange.class::cast);
     }
+
+    public void updateVersionStatus() {
+        controller().updateVersionStatus(VersionStatus.compute(controller(), tester.controller().systemVersion()));
+    }
     
     public void updateVersionStatus(Version currentVersion) {
         controller().updateVersionStatus(VersionStatus.compute(controller(), currentVersion));
     }
 
     public void upgradeSystem(Version version) {
+        controllerTester().configServer().setDefaultVersion(version);
         updateVersionStatus(version);
         upgrader().maintain();
     }
@@ -125,12 +135,23 @@ public class DeploymentTester {
     public void deployCompletely(Application application, ApplicationPackage applicationPackage) {
         notifyJobCompletion(JobType.component, application, true);
         assertTrue(applications().require(application.id()).deploying().isPresent());
-        completeDeployment(application, applicationPackage, Optional.empty());
+        completeDeployment(application, applicationPackage, Optional.empty(), true);
     }
 
-    private void completeDeployment(Application application, ApplicationPackage applicationPackage, Optional<JobType> failOnJob) {
+    /** Deploy application using the given application package, but expecting to stop after test phases */
+    public void deployTestOnly(Application application, ApplicationPackage applicationPackage) {
+        notifyJobCompletion(JobType.component, application, true);
+        assertTrue(applications().require(application.id()).deploying().isPresent());
+        completeDeployment(application, applicationPackage, Optional.empty(), false);
+    }
+
+    private void completeDeployment(Application application, ApplicationPackage applicationPackage, 
+                                    Optional<JobType> failOnJob, boolean includingProductionZones) {
         DeploymentOrder order = new DeploymentOrder(controller());
-        for (JobType job : order.jobsFrom(applicationPackage.deploymentSpec())) {
+        List<JobType> jobs = order.jobsFrom(applicationPackage.deploymentSpec());
+        if ( ! includingProductionZones)
+            jobs = jobs.stream().filter(job -> ! job.isProduction()).collect(Collectors.toList());
+        for (JobType job : jobs) {
             boolean failJob = failOnJob.map(j -> j.equals(job)).orElse(false);
             deployAndNotify(application, applicationPackage, !failJob, job);
             if (failJob) {
@@ -140,8 +161,11 @@ public class DeploymentTester {
         if (failOnJob.isPresent()) {
             assertTrue(applications().require(application.id()).deploying().isPresent());
             assertTrue(applications().require(application.id()).deploymentJobs().hasFailures());
-        } else {
+        } else if (includingProductionZones) {
             assertFalse(applications().require(application.id()).deploying().isPresent());
+        }
+        else {
+            assertTrue(applications().require(application.id()).deploying().isPresent());
         }
     }
 
@@ -156,7 +180,7 @@ public class DeploymentTester {
     public void completeUpgrade(Application application, Version version, String upgradePolicy) {
         assertTrue(applications().require(application.id()).deploying().isPresent());
         assertEquals(new Change.VersionChange(version), applications().require(application.id()).deploying().get());
-        completeDeployment(application, applicationPackage(upgradePolicy), Optional.empty());
+        completeDeployment(application, applicationPackage(upgradePolicy), Optional.empty(), true);
     }
 
     public void completeUpgradeWithError(Application application, Version version, String upgradePolicy, JobType failOnJob) {
@@ -170,7 +194,7 @@ public class DeploymentTester {
     private void completeUpgradeWithError(Application application, Version version, ApplicationPackage applicationPackage, Optional<JobType> failOnJob) {
         assertTrue(applications().require(application.id()).deploying().isPresent());
         assertEquals(new Change.VersionChange(version), applications().require(application.id()).deploying().get());
-        completeDeployment(application, applicationPackage, failOnJob);
+        completeDeployment(application, applicationPackage, failOnJob, true);
     }
 
     public void deploy(JobType job, Application application, ApplicationPackage applicationPackage) {
@@ -214,8 +238,7 @@ public class DeploymentTester {
                 jobType,
                 application.deploymentJobs().projectId().get(),
                 42,
-                jobError,
-                false
+                jobError
         );
     }
 

@@ -1,6 +1,9 @@
 // Copyright 2017 Yahoo Holdings. Licensed under the terms of the Apache 2.0 license. See LICENSE in the project root.
 
 #include <tests/proton/common/dummydbowner.h>
+#include <vespa/document/datatype/documenttype.h>
+#include <vespa/fastos/file.h>
+#include <vespa/persistence/spi/test.h>
 #include <vespa/searchcore/proton/attribute/flushableattribute.h>
 #include <vespa/searchcore/proton/common/feedtoken.h>
 #include <vespa/searchcore/proton/common/statusreport.h>
@@ -19,20 +22,17 @@
 #include <vespa/searchcorespi/index/indexflushtarget.h>
 #include <vespa/searchlib/index/dummyfileheadercontext.h>
 #include <vespa/searchlib/transactionlog/translogserver.h>
-#include <vespa/messagebus/emptyreply.h>
-#include <vespa/messagebus/testlib/receptor.h>
-#include <vespa/document/datatype/documenttype.h>
 #include <vespa/vespalib/data/slime/slime.h>
 #include <vespa/vespalib/testkit/test_kit.h>
-#include <vespa/fastos/file.h>
 
+using namespace cloud::config::filedistribution;
+using namespace proton;
+using namespace storage::spi::test;
+using namespace vespalib::slime;
 
 using document::DocumentType;
 using document::DocumentTypeRepo;
 using document::DocumenttypesConfig;
-using namespace cloud::config::filedistribution;
-using namespace proton;
-using namespace vespalib::slime;
 using search::TuneFileDocumentDB;
 using search::index::DummyFileHeaderContext;
 using search::index::Schema;
@@ -44,25 +44,11 @@ using vespalib::Slime;
 
 namespace {
 
-class LocalTransport : public FeedToken::ITransport {
-    mbus::Receptor _receptor;
-
-public:
-    void send(mbus::Reply::UP reply) {
-        fprintf(stderr, "in local transport.");
-        _receptor.handleReply(std::move(reply));
-    }
-
-    mbus::Reply::UP getReply() {
-        return _receptor.getReply(10000);
-    }
-};
-
 struct MyDBOwner : public DummyDBOwner
 {
     std::shared_ptr<DocumentDBReferenceRegistry> _registry;
     MyDBOwner();
-    ~MyDBOwner();
+    ~MyDBOwner() override;
     std::shared_ptr<IDocumentDBReferenceRegistry> getDocumentDBReferenceRegistry() const override {
         return _registry;
     }
@@ -72,7 +58,7 @@ MyDBOwner::MyDBOwner()
     : DummyDBOwner(),
       _registry(std::make_shared<DocumentDBReferenceRegistry>())
 {}
-MyDBOwner::~MyDBOwner() {}
+MyDBOwner::~MyDBOwner() = default;
 
 struct Fixture {
     DummyWireService _dummy;
@@ -107,36 +93,29 @@ Fixture::Fixture()
     config::DirSpec spec(TEST_PATH("cfg"));
     DocumentDBConfigHelper mgr(spec, "typea");
     BootstrapConfig::SP
-        b(new BootstrapConfig(1,
-                              documenttypesConfig,
-                              repo,
+        b(new BootstrapConfig(1, documenttypesConfig, repo,
                               std::make_shared<ProtonConfig>(),
                               std::make_shared<FiledistributorrpcConfig>(),
                               tuneFileDocumentDB));
     mgr.forwardConfig(b);
     mgr.nextGeneration(0);
-    _db.reset(new DocumentDB(".", mgr.getConfig(), "tcp/localhost:9014",
-                             _queryLimiter, _clock, DocTypeName("typea"),
-                             ProtonConfig(),
-                             _myDBOwner, _summaryExecutor, _summaryExecutor, NULL, _dummy, _fileHeaderContext,
-                             ConfigStore::UP(new MemoryConfigStore),
-                             std::make_shared<vespalib::ThreadStackExecutor>
-                             (16, 128 * 1024),
-                             _hwInfo));
+    _db.reset(new DocumentDB(".", mgr.getConfig(), "tcp/localhost:9014", _queryLimiter, _clock, DocTypeName("typea"),
+                             makeBucketSpace(),
+                             *b->getProtonConfigSP(), _myDBOwner, _summaryExecutor, _summaryExecutor, _tls, _dummy,
+                             _fileHeaderContext, ConfigStore::UP(new MemoryConfigStore),
+                             std::make_shared<vespalib::ThreadStackExecutor>(16, 128 * 1024), _hwInfo));
     _db->start();
     _db->waitForOnlineState();
 }
 
-Fixture::~Fixture() {}
+Fixture::~Fixture() = default;
 
 const IFlushTarget *
 extractRealFlushTarget(const IFlushTarget *target)
 {
-    const JobTrackedFlushTarget *tracked =
-            dynamic_cast<const JobTrackedFlushTarget*>(target);
+    const auto tracked = dynamic_cast<const JobTrackedFlushTarget*>(target);
     if (tracked != nullptr) {
-        const ThreadedFlushTarget *threaded =
-                dynamic_cast<const ThreadedFlushTarget*>(&tracked->getTarget());
+        const auto threaded = dynamic_cast<const ThreadedFlushTarget*>(&tracked->getTarget());
         if (threaded != nullptr) {
             return threaded->getFlushTarget().get();
         }
@@ -147,10 +126,10 @@ extractRealFlushTarget(const IFlushTarget *target)
 TEST_F("requireThatIndexFlushTargetIsUsed", Fixture) {
     auto targets = f._db->getFlushTargets();
     ASSERT_TRUE(!targets.empty());
-    const IndexFlushTarget *index = 0;
+    const IndexFlushTarget *index = nullptr;
     for (size_t i = 0; i < targets.size(); ++i) {
         const IFlushTarget *target = extractRealFlushTarget(targets[i].get());
-        if (target != NULL) {
+        if (target != nullptr) {
             index = dynamic_cast<const IndexFlushTarget *>(target);
         }
         if (index) {
@@ -164,9 +143,9 @@ template <typename Target>
 size_t getNumTargets(const std::vector<IFlushTarget::SP> & targets)
 {
     size_t retval = 0;
-    for (size_t i = 0; i < targets.size(); ++i) {
-        const IFlushTarget *target = extractRealFlushTarget(targets[i].get());
-        if (dynamic_cast<const Target*>(target) == NULL) {
+    for (const auto & candidate : targets) {
+        const IFlushTarget *target = extractRealFlushTarget(candidate.get());
+        if (dynamic_cast<const Target*>(target) == nullptr) {
             continue;
         }
         retval++;
@@ -247,16 +226,16 @@ TEST_F("requireThatStateIsReported", Fixture)
 
 TEST_F("require that session manager can be explored", Fixture)
 {
-    EXPECT_TRUE(DocumentDBExplorer(f._db).get_child("session").get() != nullptr);    
+    EXPECT_TRUE(DocumentDBExplorer(f._db).get_child("session"));
 }
 
 TEST_F("require that document db registers reference", Fixture)
 {
     auto &registry = f._myDBOwner._registry;
     auto reference = registry->get("typea");
-    EXPECT_TRUE(reference.get() != nullptr);
+    EXPECT_TRUE(reference);
     auto attr = reference->getAttribute("attr1");
-    EXPECT_TRUE(attr.get() != nullptr);
+    EXPECT_TRUE(attr);
     EXPECT_EQUAL(search::attribute::BasicType::INT32, attr->getBasicType());
 }
 

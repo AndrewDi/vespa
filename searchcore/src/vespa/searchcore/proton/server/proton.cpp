@@ -75,20 +75,31 @@ setFS4Compression(const ProtonConfig & proton)
 }
 
 DiskMemUsageSampler::Config
-diskMemUsageSamplerConfig(const ProtonConfig &proton)
+diskMemUsageSamplerConfig(const ProtonConfig &proton, const HwInfo &hwInfo)
 {
     return DiskMemUsageSampler::Config(
             proton.writefilter.memorylimit,
             proton.writefilter.disklimit,
-            proton.writefilter.sampleinterval);
+            proton.writefilter.sampleinterval,
+            hwInfo);
 }
 
+size_t
+deriveCompactionCompressionThreads(const ProtonConfig &proton,
+                                   const HwInfo::Cpu &cpuInfo) {
+    size_t scaledCores = (size_t)std::ceil(cpuInfo.cores() * proton.feeding.concurrency);
+    size_t threads = std::max(scaledCores, size_t(proton.summary.log.numthreads));
+
+    // We need at least 1 guaranteed free worker in order to ensure progress so #documentsdbs + 1 should suffice,
+    // but we will not be cheap and give #documentsdbs * 2
+    return std::max(threads, proton.documentdb.size() * 2);;
 }
 
-static const vespalib::string CUSTOM_COMPONENT_API_PATH = "/state/v1/custom/component";
+const vespalib::string CUSTOM_COMPONENT_API_PATH = "/state/v1/custom/component";
 
-Proton::ProtonFileHeaderContext::ProtonFileHeaderContext(const Proton &proton_,
-        const vespalib::string &creator)
+}
+
+Proton::ProtonFileHeaderContext::ProtonFileHeaderContext(const Proton &proton_, const vespalib::string &creator)
     : _proton(proton_),
       _hostName(),
       _creator(creator),
@@ -206,7 +217,7 @@ Proton::init()
 {
     assert( ! _initStarted && ! _initComplete );
     _initStarted = true;
-    if (_threadPool.NewThread(&_clock, NULL) == NULL) {
+    if (_threadPool.NewThread(&_clock, nullptr) == nullptr) {
         throw IllegalStateException("Failed starting thread for the cheap clock");
     }
     _protonConfigFetcher.start();
@@ -223,22 +234,27 @@ Proton::init(const BootstrapConfig::SP & configSnapshot)
 {
     assert( _initStarted && ! _initComplete );
     const ProtonConfig &protonConfig = configSnapshot->getProtonConfig();
-    const auto &samplerCfgArgs = protonConfig.hwinfo.disk;
-    HwInfoSampler::Config samplerCfg(samplerCfgArgs.writespeed,
-                                     samplerCfgArgs.slowwritespeedlimit,
-                                     samplerCfgArgs.samplewritesize);
-    _hwInfoSampler = std::make_unique<HwInfoSampler>(protonConfig.basedir,
-                                                     samplerCfg);
+    const auto &hwDiskCfg = protonConfig.hwinfo.disk;
+    const auto &hwMemoryCfg = protonConfig.hwinfo.memory;
+    const auto &hwCpuCfg = protonConfig.hwinfo.cpu;
+    // TODO: Forward disk size when performance impact of disk usage sampling is verified
+    HwInfoSampler::Config samplerCfg(0,
+                                     hwDiskCfg.writespeed,
+                                     hwDiskCfg.slowwritespeedlimit,
+                                     hwDiskCfg.samplewritesize,
+                                     hwDiskCfg.shared,
+                                     hwMemoryCfg.size,
+                                     hwCpuCfg.cores);
+    _hwInfoSampler = std::make_unique<HwInfoSampler>(protonConfig.basedir, samplerCfg);
     _hwInfo = _hwInfoSampler->hwInfo();
     setFS4Compression(protonConfig);
     _diskMemUsageSampler = std::make_unique<DiskMemUsageSampler>
                            (protonConfig.basedir,
-                            diskMemUsageSamplerConfig(protonConfig));
+                            diskMemUsageSamplerConfig(protonConfig, _hwInfo));
 
     _metricsEngine.reset(new MetricsEngine());
     _metricsEngine->addMetricsHook(_metricsHook);
-    _fileHeaderContext.setClusterName(protonConfig.clustername,
-                                      protonConfig.basedir);
+    _fileHeaderContext.setClusterName(protonConfig.clustername, protonConfig.basedir);
     _tls.reset(new TLS(_configUri.createWithNewId(protonConfig.tlsconfigid), _fileHeaderContext));
     _matchEngine.reset(new MatchEngine(protonConfig.numsearcherthreads,
                                        protonConfig.numthreadspersearch,
@@ -250,8 +266,8 @@ Proton::init(const BootstrapConfig::SP & configSnapshot)
     const ProtonConfig::Flush & flush(protonConfig.flush);
     switch (flush.strategy) {
     case ProtonConfig::Flush::MEMORY: {
-        MemoryFlush::SP memoryFlush = std::make_shared<MemoryFlush>(
-                MemoryFlushConfigUpdater::convertConfig(flush.memory));
+        auto memoryFlush = std::make_shared<MemoryFlush>(
+                MemoryFlushConfigUpdater::convertConfig(flush.memory), fastos::ClockSystem::now());
         _memoryFlushConfigUpdater = std::make_unique<MemoryFlushConfigUpdater>(memoryFlush, flush.memory);
         _diskMemUsageSampler->notifier().addDiskMemUsageListener(_memoryFlushConfigUpdater.get());
         strategy = memoryFlush;
@@ -283,14 +299,12 @@ Proton::init(const BootstrapConfig::SP & configSnapshot)
 
     vespalib::string fileConfigId;
     _warmupExecutor.reset(new vespalib::ThreadStackExecutor(4, 128*1024));
-    // We need at least 1 guaranteed free worker in order to ensure progress so #documentsdbs + 1 should suffice,
-    // but we will not be cheap and give #documentsdbs * 2
-    const size_t summaryThreads = std::max(size_t(protonConfig.summary.log.numthreads), protonConfig.documentdb.size() * 2);
+
+    const size_t summaryThreads = deriveCompactionCompressionThreads(protonConfig, _hwInfo.cpu());
     _summaryExecutor.reset(new vespalib::BlockingThreadStackExecutor(summaryThreads, 128*1024, summaryThreads*16));
     InitializeThreads initializeThreads;
     if (protonConfig.initialize.threads > 0) {
-        initializeThreads = std::make_shared<vespalib::ThreadStackExecutor>
-                            (protonConfig.initialize.threads, 128 * 1024);
+        initializeThreads = std::make_shared<vespalib::ThreadStackExecutor>(protonConfig.initialize.threads, 128 * 1024);
         _initDocumentDbsInSequence = (protonConfig.initialize.threads == 1);
     }
     _protonConfigurer.applyInitialConfig(initializeThreads);
@@ -341,7 +355,7 @@ Proton::applyConfig(const BootstrapConfig::SP & configSnapshot)
                             protonConfig.search.memory.limiter.minhits);
     const DocumentTypeRepo::SP repo = configSnapshot->getDocumentTypeRepoSP();
 
-    _diskMemUsageSampler->setConfig(diskMemUsageSamplerConfig(protonConfig));
+    _diskMemUsageSampler->setConfig(diskMemUsageSamplerConfig(protonConfig, _hwInfo));
     if (_memoryFlushConfigUpdater) {
         _memoryFlushConfigUpdater->setConfig(protonConfig.flush.memory);
         _flushEngine->kick();
@@ -349,9 +363,10 @@ Proton::applyConfig(const BootstrapConfig::SP & configSnapshot)
 }
 
 IDocumentDBConfigOwner *
-Proton::addDocumentDB(const DocTypeName & docTypeName,
-                      const vespalib::string & configId,
-                      const BootstrapConfig::SP & bootstrapConfig,
+Proton::addDocumentDB(const DocTypeName &docTypeName,
+                      document::BucketSpace bucketSpace,
+                      const vespalib::string &configId,
+                      const BootstrapConfig::SP &bootstrapConfig,
                       const DocumentDBConfig::SP &documentDBConfig,
                       InitializeThreads initializeThreads)
 {
@@ -361,7 +376,7 @@ Proton::addDocumentDB(const DocTypeName & docTypeName,
         if (docType != NULL) {
             LOG(info, "Add document database: doctypename(%s), configid(%s)",
                 docTypeName.toString().c_str(), configId.c_str());
-            return addDocumentDB(*docType, bootstrapConfig, documentDBConfig, initializeThreads).get();
+            return addDocumentDB(*docType, bucketSpace, bootstrapConfig, documentDBConfig, initializeThreads).get();
         } else {
 
             LOG(warning,
@@ -420,7 +435,7 @@ Proton::~Proton()
         _summaryExecutor->sync();
     }
     LOG(debug, "Shutting down fs4 interface");
-    if (_metricsEngine) {
+    if (_metricsEngine && _fs4Server) {
         _metricsEngine->removeExternalMetrics(_fs4Server->getMetrics());
     }
     if (_fs4Server) {
@@ -507,11 +522,12 @@ Proton::getDocumentDB(const document::DocumentType &docType)
 
 DocumentDB::SP
 Proton::addDocumentDB(const document::DocumentType &docType,
+                      document::BucketSpace bucketSpace,
                       const BootstrapConfig::SP &bootstrapConfig,
                       const DocumentDBConfig::SP &documentDBConfig,
                       InitializeThreads initializeThreads)
 {
-    const ProtonConfig &config(*bootstrapConfig->getProtonConfigSP());
+    const ProtonConfig &config(bootstrapConfig->getProtonConfig());
 
     std::lock_guard<std::shared_timed_mutex> guard(_mutex);
     DocTypeName docTypeName(docType.getName());
@@ -540,11 +556,12 @@ Proton::addDocumentDB(const document::DocumentType &docType,
                                       _queryLimiter,
                                       _clock,
                                       docTypeName,
+                                      bucketSpace,
                                       config,
                                       *this,
                                       *_warmupExecutor,
                                       *_summaryExecutor,
-                                      _tls->getTransLogServer().get(),
+                                      *_tls->getTransLogServer(),
                                       *_metricsEngine,
                                       _fileHeaderContext,
                                       std::move(config_store),
@@ -553,10 +570,8 @@ Proton::addDocumentDB(const document::DocumentType &docType,
     try {
         ret->start();
     } catch (vespalib::Exception &e) {
-        LOG(warning,
-            "Failed to start database for document type '%s'; %s",
-            docTypeName.toString().c_str(),
-            e.what());
+        LOG(warning, "Failed to start database for document type '%s'; %s",
+            docTypeName.toString().c_str(), e.what());
         return DocumentDB::SP();
     }
     // Wait for replay done on document dbs added due to reconfigs, since engines are already up and running.
@@ -567,18 +582,16 @@ Proton::addDocumentDB(const document::DocumentType &docType,
     _metricsEngine->addDocumentDBMetrics(ret->getMetricsCollection());
     _metricsEngine->addMetricsHook(ret->getMetricsUpdateHook());
     _documentDBMap[docTypeName] = ret;
-    if (_persistenceEngine.get() != NULL) {
+    if (_persistenceEngine) {
         // Not allowed to get to service layer to call pause().
         std::unique_lock<std::shared_timed_mutex> persistenceWGuard(_persistenceEngine->getWLock());
-        PersistenceHandlerProxy::SP
-            persistenceHandler(new PersistenceHandlerProxy(ret));
+        auto persistenceHandler = std::make_shared<PersistenceHandlerProxy>(ret);
         if (!_isInitializing) {
-            _persistenceEngine->
-                propagateSavedClusterState(*persistenceHandler);
-            _persistenceEngine->populateInitialBucketDB(*persistenceHandler);
+            _persistenceEngine->propagateSavedClusterState(*persistenceHandler);
+            _persistenceEngine->populateInitialBucketDB(bucketSpace, *persistenceHandler);
         }
         // TODO: Fix race with new cluster state setting.
-        _persistenceEngine->putHandler(docTypeName, persistenceHandler);
+        _persistenceEngine->putHandler(bucketSpace, docTypeName, persistenceHandler);
     }
     SearchHandlerProxy::SP searchHandler(new SearchHandlerProxy(ret));
     _summaryEngine->putSearchHandler(docTypeName, searchHandler);
@@ -597,8 +610,9 @@ Proton::removeDocumentDB(const DocTypeName &docTypeName)
     {
         std::lock_guard<std::shared_timed_mutex> guard(_mutex);
         DocumentDBMap::iterator it = _documentDBMap.find(docTypeName);
-        if (it == _documentDBMap.end())
+        if (it == _documentDBMap.end()) {
             return;
+        }
         old = it->second;
         _documentDBMap.erase(it);
     }
@@ -609,10 +623,10 @@ Proton::removeDocumentDB(const DocTypeName &docTypeName)
             // Not allowed to get to service layer to call pause().
             std::unique_lock<std::shared_timed_mutex> persistenceWguard(_persistenceEngine->getWLock());
             IPersistenceHandler::SP oldHandler;
-            oldHandler = _persistenceEngine->removeHandler(docTypeName);
+            oldHandler = _persistenceEngine->removeHandler(old->getBucketSpace(), docTypeName);
             if (_initComplete && oldHandler) {
                 // TODO: Fix race with bucket db modifying ops.
-                _persistenceEngine->grabExtraModifiedBuckets(*oldHandler);
+                _persistenceEngine->grabExtraModifiedBuckets(old->getBucketSpace(), *oldHandler);
             }
         }
         _persistenceEngine->destroyIterators();
@@ -638,10 +652,7 @@ Proton::ping(MonitorRequest::UP request, MonitorClient & client)
     BootstrapConfig::SP configSnapshot = getActiveConfigSnapshot();
     const ProtonConfig &protonConfig = configSnapshot->getProtonConfig();
     ret.partid = protonConfig.partition;
-    if (_matchEngine->isOnline())
-        ret.timestamp = 42; // change to flush caches on tld/qrs
-    else
-        ret.timestamp = 0;
+    ret.timestamp = (_matchEngine->isOnline()) ? 42 : 0;
     ret.activeDocs = getNumActiveDocs();
     ret.activeDocsRequested = request->reportActiveDocs;
     return reply;
@@ -650,7 +661,7 @@ Proton::ping(MonitorRequest::UP request, MonitorClient & client)
 bool
 Proton::triggerFlush()
 {
-    if ((_flushEngine.get() == NULL) || ! _flushEngine->HasThread()) {
+    if (!_flushEngine || ! _flushEngine->HasThread()) {
         return false;
     }
     _flushEngine->triggerFlush();
@@ -671,13 +682,12 @@ createPrepareRestartConfig(const ProtonConfig &protonConfig)
 bool
 Proton::prepareRestart()
 {
-    if ((_flushEngine.get() == NULL) || ! _flushEngine->HasThread()) {
+    if (!_flushEngine || ! _flushEngine->HasThread()) {
         return false;
     }
     BootstrapConfig::SP configSnapshot = getActiveConfigSnapshot();
-    IFlushStrategy::SP strategy =
-            std::make_shared<PrepareRestartFlushStrategy>(
-                    createPrepareRestartConfig(configSnapshot->getProtonConfig()));
+    auto strategy = std::make_shared<PrepareRestartFlushStrategy>(
+            createPrepareRestartConfig(configSnapshot->getProtonConfig()));
     _flushEngine->setStrategy(strategy);
     return true;
 }
@@ -689,7 +699,7 @@ int countOpenFiles()
     static const char * const fd_dir_name = "/proc/self/fd";
     int count = 0;
     DIR *dp = opendir(fd_dir_name);
-    if (dp != NULL) {
+    if (dp != nullptr) {
         struct dirent *ptr;
         while ((ptr = readdir(dp)) != nullptr) {
             if (strcmp(".", ptr->d_name) == 0) continue;
@@ -726,10 +736,6 @@ Proton::updateMetrics(const vespalib::MonitorGuard &)
         metrics.summaryExecutor.update(_summaryEngine->getExecutorStats());
     }
 }
-
-namespace {
-const std::string config_id_tag = "CONFIG ID";
-}  // namespace
 
 void
 Proton::waitForInitDone()

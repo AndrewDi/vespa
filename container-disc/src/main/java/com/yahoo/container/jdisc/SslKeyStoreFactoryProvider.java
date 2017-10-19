@@ -8,7 +8,7 @@ import com.yahoo.jdisc.http.ssl.SslKeyStoreFactory;
 
 /**
  * An SSL key store provider which provides a factory which throws exception on
- * invocation - as no SSL key store is currently provided by default.
+ * invocation  as no SSL key store is currently provided by default.
  * The purpose of this is to provide a ssl store factory for injection in the case where
  * no secret store component is provided.
  *

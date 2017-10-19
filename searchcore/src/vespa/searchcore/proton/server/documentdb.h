@@ -5,20 +5,23 @@
 #include "clusterstatehandler.h"
 #include "configstore.h"
 #include "ddbstate.h"
+#include "disk_mem_usage_forwarder.h"
 #include "documentdbconfig.h"
 #include "documentsubdbcollection.h"
+#include "executorthreadingservice.h"
 #include "feedhandler.h"
+#include "i_document_db_config_owner.h"
+#include "i_document_subdb_owner.h"
 #include "i_feed_handler_owner.h"
 #include "i_lid_space_compaction_handler.h"
 #include "ifeedview.h"
 #include "ireplayconfig.h"
 #include "maintenancecontroller.h"
-#include "i_document_db_config_owner.h"
-#include "executorthreadingservice.h"
+#include "threading_service_config.h"
 #include "visibilityhandler.h"
-#include "i_document_subdb_owner.h"
-#include "disk_mem_usage_forwarder.h"
 
+#include <vespa/metrics/updatehook.h>
+#include <vespa/searchcore/proton/attribute/attribute_usage_filter.h>
 #include <vespa/searchcore/proton/common/doctypename.h>
 #include <vespa/searchcore/proton/common/monitored_refcount.h>
 #include <vespa/searchcore/proton/metrics/documentdb_job_trackers.h>
@@ -28,8 +31,6 @@
 #include <vespa/searchlib/docstore/cachestats.h>
 #include <vespa/searchlib/transactionlog/syncproxy.h>
 #include <vespa/vespalib/util/varholder.h>
-#include <vespa/searchcore/proton/attribute/attribute_usage_filter.h>
-#include <vespa/metrics/updatehook.h>
 #include <mutex>
 #include <condition_variable>
 
@@ -78,10 +79,9 @@ private:
     using ProtonConfig = vespa::config::search::core::ProtonConfig;
 
     DocTypeName                   _docTypeName;
+    document::BucketSpace         _bucketSpace;
     vespalib::string              _baseDir;
-    uint32_t                      _defaultExecutorTaskLimit;
-    uint32_t                      _semiUnboundExecutorTaskLimit;
-    uint32_t                      _indexingThreads;
+    ThreadingServiceConfig        _writeServiceConfig;
     // Only one thread per executor, or dropFeedView() will fail.
     ExecutorThreadingService      _writeService;
     // threads for initializer tasks during proton startup
@@ -108,13 +108,12 @@ private:
 
     ClusterStateHandler           _clusterStateHandler;
     BucketHandler                 _bucketHandler;
-    ProtonConfig::Summary         _protonSummaryCfg;
     ProtonConfig::Index           _protonIndexCfg;
     ConfigStore::UP               _config_store;
     std::shared_ptr<matching::SessionManager>  _sessionManager; // TODO: This should not have to be a shared pointer.
     MetricsWireService             &_metricsWireService;
     MetricsUpdateHook             _metricsHook;
-    vespalib::VarHolder<IFeedView::SP>      _feedView;
+    vespalib::VarHolder<IFeedView::SP> _feedView;
     MonitoredRefCount             _refCount;
     bool                          _syncFeedViewEnabled;
     IDocumentDBOwner             &_owner;
@@ -142,7 +141,8 @@ private:
     void performReconfig(DocumentDBConfig::SP configSnapshot);
     void closeSubDBs();
 
-    void applySubDBConfig(const DocumentDBConfig &newConfigSnapshot, SerialNum serialNum, const ReconfigParams &params);
+    void applySubDBConfig(const DocumentDBConfig &newConfigSnapshot,
+                          SerialNum serialNum, const ReconfigParams &params);
     void applyConfig(DocumentDBConfig::SP configSnapshot, SerialNum serialNum);
 
     /**
@@ -163,7 +163,7 @@ private:
      * Redo interrupted reprocessing if last entry in transaction log
      * is a config change.
      */
-    virtual void enterRedoReprocessState() override;
+    void enterRedoReprocessState() override;
     void enterApplyLiveConfigState();
 
     /**
@@ -233,16 +233,17 @@ public:
      * @param config_store Access to read and write configs.
      */
     DocumentDB(const vespalib::string &baseDir,
-               const DocumentDBConfig::SP & currentSnapshot,
+               const DocumentDBConfig::SP &currentSnapshot,
                const vespalib::string &tlsSpec,
-               matching::QueryLimiter & queryLimiter,
+               matching::QueryLimiter &queryLimiter,
                const vespalib::Clock &clock,
                const DocTypeName &docTypeName,
+               document::BucketSpace bucketSpace,
                const ProtonConfig &protonCfg,
-               IDocumentDBOwner & owner,
-               vespalib::ThreadExecutor & warmupExecutor,
-               vespalib::ThreadStackExecutorBase & summaryExecutor,
-               search::transactionlog::Writer * tlsDirectWriter,
+               IDocumentDBOwner &owner,
+               vespalib::ThreadExecutor &warmupExecutor,
+               vespalib::ThreadStackExecutorBase &summaryExecutor,
+               search::transactionlog::Writer &tlsDirectWriter,
                MetricsWireService &metricsWireService,
                const search::common::FileHeaderContext &fileHeaderContext,
                ConfigStore::UP config_store,
@@ -390,25 +391,17 @@ public:
     void release() { _refCount.release(); }
 
     bool getDelayedConfig() const { return _state.getDelayedConfig(); }
-
-    /**
-     * Implements IReplayConfig API.
-     */
-    virtual void replayConfig(SerialNum serialNum) override;
-
+    void replayConfig(SerialNum serialNum) override;
     const DocTypeName & getDocTypeName() const { return _docTypeName; }
-
     void newConfigSnapshot(DocumentDBConfig::SP snapshot);
-
-    // Implements DocumentDBConfigOwner
     void reconfigure(const DocumentDBConfig::SP & snapshot) override;
-
     int64_t getActiveGeneration() const;
-
-    // Implements IDocumentSubDBOwner
+    /*
+     * Implements IDocumentSubDBOwner
+     */
     void syncFeedView() override;
-
-    vespalib::string getName() const override { return _docTypeName.getName(); }
+    document::BucketSpace getBucketSpace() const override;
+    vespalib::string getName() const override;
     uint32_t getDistributionKey() const override;
 
     /**
@@ -432,7 +425,7 @@ public:
      *
      * Sync transaction log to syncTo.
      */
-    virtual void sync(SerialNum syncTo) override;
+    void sync(SerialNum syncTo) override;
     void enterReprocessState();
     void enterOnlineState();
     void waitForOnlineState();
@@ -440,4 +433,3 @@ public:
 };
 
 } // namespace proton
-

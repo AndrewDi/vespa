@@ -31,27 +31,21 @@ public class DeploymentJobs {
     private final Optional<Long> projectId;
     private final ImmutableMap<JobType, JobStatus> status;
     private final Optional<String> jiraIssueId;
-    private final boolean selfTriggering; // TODO: Remove this when no projects are self-triggering.
 
-    /** Creates an empty set of deployment jobs */
-    public DeploymentJobs(long projectId) {
-        this(Optional.of(projectId), ImmutableMap.of(), Optional.empty(),true);
+    public DeploymentJobs(Optional<Long> projectId, Collection<JobStatus> jobStatusEntries,
+                          Optional<String> jiraIssueId) {
+        this(projectId, asMap(jobStatusEntries), jiraIssueId);
     }
-    
-    public DeploymentJobs(Optional<Long> projectId, Collection<JobStatus> jobStatusEntries, Optional<String> jiraIssueId, boolean selfTriggering) {
-        this(projectId, asMap(jobStatusEntries), jiraIssueId, selfTriggering);
-    }
-    
-    private DeploymentJobs(Optional<Long> projectId, Map<JobType, JobStatus> status, Optional<String> jiraIssueId, boolean selfTriggering) {
-        Objects.requireNonNull(projectId, "projectId cannot be null");
+
+    private DeploymentJobs(Optional<Long> projectId, Map<JobType, JobStatus> status, Optional<String> jiraIssueId) {
+        requireId(projectId, "projectId cannot be null or <= 0");
         Objects.requireNonNull(status, "status cannot be null");
         Objects.requireNonNull(jiraIssueId, "jiraIssueId cannot be null");
         this.projectId = projectId;
         this.status = ImmutableMap.copyOf(status);
         this.jiraIssueId = jiraIssueId;
-        this.selfTriggering = selfTriggering;
     }
-    
+
     private static Map<JobType, JobStatus> asMap(Collection<JobStatus> jobStatusEntries) {
         ImmutableMap.Builder<JobType, JobStatus> b = new ImmutableMap.Builder<>();
         for (JobStatus jobStatusEntry : jobStatusEntries)
@@ -66,7 +60,7 @@ public class DeploymentJobs {
             if (job == null) job = JobStatus.initial(report.jobType());
             return job.withCompletion(report.jobError(), notificationTime, controller);
         });
-        return new DeploymentJobs(Optional.of(report.projectId()), status, jiraIssueId, report.selfTriggering());
+        return new DeploymentJobs(Optional.of(report.projectId()), status, jiraIssueId);
     }
 
     public DeploymentJobs withTriggering(JobType jobType,
@@ -81,32 +75,25 @@ public class DeploymentJobs {
                                       change.isPresent() && change.get() instanceof Change.VersionChange,
                                       triggerTime);
         });
-        return new DeploymentJobs(projectId, status, jiraIssueId, selfTriggering);
+        return new DeploymentJobs(projectId, status, jiraIssueId);
     }
 
     public DeploymentJobs withProjectId(long projectId) {
-        return new DeploymentJobs(Optional.of(projectId), status, jiraIssueId, selfTriggering);
+        return new DeploymentJobs(Optional.of(projectId), status, jiraIssueId);
     }
 
     public DeploymentJobs withJiraIssueId(Optional<String> jiraIssueId) {
-        return new DeploymentJobs(projectId, status, jiraIssueId, selfTriggering);
+        return new DeploymentJobs(projectId, status, jiraIssueId);
     }
 
     public DeploymentJobs without(JobType job) {
         Map<JobType, JobStatus> status = new HashMap<>(this.status);
         status.remove(job);
-        return new DeploymentJobs(projectId, status, jiraIssueId, selfTriggering);
-    }
-    
-    public DeploymentJobs asSelfTriggering(boolean selfTriggering) {
-        return new DeploymentJobs(projectId, status, jiraIssueId, selfTriggering);
+        return new DeploymentJobs(projectId, status, jiraIssueId);
     }
 
     /** Returns an immutable map of the status entries in this */
     public Map<JobType, JobStatus> jobStatus() { return status; }
-
-    /** Returns whether this application's deployment jobs trigger each other, and should be left alone, or not. */
-    public boolean isSelfTriggering() { return selfTriggering; }
 
     /** Returns whether this has some job status which is not a success */
     public boolean hasFailures() {
@@ -114,8 +101,15 @@ public class DeploymentJobs {
     }
 
     /** Returns whether any job is currently in progress */
-    public boolean inProgress() {
-        return status.values().stream().anyMatch(JobStatus::inProgress);
+    public boolean isRunning(Instant timeoutLimit) {
+        return status.values().stream().anyMatch(job -> job.isRunning(timeoutLimit));
+    }
+
+    /** Returns whether the given job type is currently running and was started after timeoutLimit */
+    public boolean isRunning(JobType jobType, Instant timeoutLimit) {
+        JobStatus jobStatus = status.get(jobType);
+        if ( jobStatus == null) return false;
+        return jobStatus.isRunning(timeoutLimit);
     }
 
     /** Returns whether change can be deployed to the given environment */
@@ -131,14 +125,11 @@ public class DeploymentJobs {
         return true; // other environments do not have any preconditions
     }
 
-    /** Returns whether change has been deployed completely */
-    public boolean isDeployed(Optional<Change> change) {
-        if (!change.isPresent()) {
-            return true;
-        }
+    /** Returns whether the given change has been deployed completely */
+    public boolean isDeployed(Change change) {
         return status.values().stream()
                 .filter(status -> status.type().isProduction())
-                .allMatch(status -> isSuccessful(change.get(), status.type()));
+                .allMatch(status -> isSuccessful(change, status.type()));
     }
 
     /** Returns whether job has completed successfully */
@@ -281,19 +272,18 @@ public class DeploymentJobs {
         private final long projectId;
         private final long buildNumber;
         private final Optional<JobError> jobError;
-        private final boolean selfTriggering;
 
         public JobReport(ApplicationId applicationId, JobType jobType, long projectId, long buildNumber,
-                         Optional<JobError> jobError, boolean selfTriggering) {
+                         Optional<JobError> jobError) {
             Objects.requireNonNull(applicationId, "applicationId cannot be null");
             Objects.requireNonNull(jobType, "jobType cannot be null");
             Objects.requireNonNull(jobError, "jobError cannot be null");
+
             this.applicationId = applicationId;
             this.projectId = projectId;
             this.buildNumber = buildNumber;
             this.jobType = jobType;
             this.jobError = jobError;
-            this.selfTriggering = selfTriggering;
         }
 
         public ApplicationId applicationId() { return applicationId; }
@@ -302,7 +292,6 @@ public class DeploymentJobs {
         public long buildNumber() { return buildNumber; }
         public boolean success() { return !jobError.isPresent(); }
         public Optional<JobError> jobError() { return jobError; }
-        public boolean selfTriggering() { return selfTriggering; }
 
     }
 
@@ -315,6 +304,17 @@ public class DeploymentJobs {
                     .filter(b -> !b)
                     .map(ignored -> unknown);
         }
+    }
+
+    private static Optional<Long> requireId(Optional<Long> id, String message) {
+        Objects.requireNonNull(id, message);
+        if (!id.isPresent()) {
+            return id;
+        }
+        if (id.get() <= 0) {
+            throw new IllegalArgumentException(message);
+        }
+        return id;
     }
 
 }

@@ -30,9 +30,22 @@ public class VespaMetricSet {
         metrics.addAll(getQrserverMetrics());
         metrics.addAll(getContainerMetrics());
         metrics.addAll(getConfigServerMetrics());
+        metrics.addAll(getSentinelMetrics());
         metrics.addAll(getOtherMetrics());
 
         return Collections.unmodifiableSet(metrics);
+    }
+
+    private static Set<Metric> getSentinelMetrics() {
+        Set<Metric> metrics = new LinkedHashSet<>();
+
+        metrics.add(new Metric("sentinel.restarts.count"));
+        metrics.add(new Metric("sentinel.uptime.last", "sentinel.uptime"));
+
+        metrics.add(new Metric("sentinel.running.count"));
+        metrics.add(new Metric("sentinel.running.last"));
+
+        return metrics;
     }
 
     private static Set<Metric> getOtherMetrics() {

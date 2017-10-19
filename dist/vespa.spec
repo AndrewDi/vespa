@@ -16,12 +16,14 @@ URL:            http://vespa.ai
 Source0:        vespa-%{version}.tar.gz
 
 %if 0%{?centos}
-BuildRequires: epel-release 
+BuildRequires: epel-release
 BuildRequires: centos-release-scl
 BuildRequires: devtoolset-6-gcc-c++
 BuildRequires: devtoolset-6-libatomic-devel
 BuildRequires: devtoolset-6-binutils
+BuildRequires: rh-maven33
 %define _devtoolset_enable /opt/rh/devtoolset-6/enable
+%define _rhmaven33_enable /opt/rh/rh-maven33/enable
 %endif
 %if 0%{?fedora}
 BuildRequires: gcc-c++
@@ -36,6 +38,7 @@ BuildRequires: vespa-zookeeper-c-client-devel >= 3.4.9-6
 %endif
 %if 0%{?fedora}
 BuildRequires: cmake >= 3.9.1
+BuildRequires: maven
 %if 0%{?fc25}
 BuildRequires: llvm-devel >= 3.9.1
 BuildRequires: boost-devel >= 1.60
@@ -49,7 +52,6 @@ BuildRequires: zookeeper-devel >= 3.4.9
 BuildRequires: lz4-devel
 BuildRequires: libzstd-devel
 BuildRequires: zlib-devel
-BuildRequires: maven
 BuildRequires: libicu-devel
 BuildRequires: java-1.8.0-openjdk-devel
 BuildRequires: openssl-devel
@@ -90,7 +92,6 @@ Requires: zookeeper >= 3.4.9
 %define _extra_link_directory /opt/vespa-libtorrent/lib;/opt/vespa-cppunit/lib
 %define _extra_include_directory /opt/vespa-libtorrent/include;/opt/vespa-cppunit/include
 %define _vespa_boost_lib_suffix %{nil}
-%define _vespa_cxx_abi_flags -D_GLIBCXX_USE_CXX11_ABI=1
 %endif
 Requires: java-1.8.0-openjdk
 Requires: openssl
@@ -113,8 +114,11 @@ Vespa - The open big data serving engine
 %if 0%{?_devtoolset_enable:1}
 source %{_devtoolset_enable} || true
 %endif
+%if 0%{?_rhmaven33_enable:1}
+source %{_rhmaven33_enable} || true
+%endif
 sh bootstrap.sh java
-mvn -nsu -T 2C install -DskipTests -Dmaven.javadoc.skip=true
+mvn -nsu -T 2C install -Dmaven.test.skip=true -Dmaven.javadoc.skip=true
 cmake3 -DCMAKE_INSTALL_PREFIX=%{_prefix} \
        -DJAVA_HOME=/usr/lib/jvm/java-openjdk \
        -DEXTRA_LINK_DIRECTORY="%{_extra_link_directory}" \
@@ -122,7 +126,6 @@ cmake3 -DCMAKE_INSTALL_PREFIX=%{_prefix} \
        -DCMAKE_INSTALL_RPATH="%{_prefix}/lib64%{?_extra_link_directory:;%{_extra_link_directory}};/usr/lib/jvm/java-1.8.0/jre/lib/amd64/server" \
        %{?_vespa_llvm_version:-DVESPA_LLVM_VERSION="%{_vespa_llvm_version}"} \
        %{?_vespa_boost_lib_suffix:-DVESPA_BOOST_LIB_SUFFIX="%{_vespa_boost_lib_suffix}"} \
-       %{?_vespa_cxx_abi_flags:-DVESPA_CXX_ABI_FLAGS="%{_vespa_cxx_abi_flags}"} \
        .
 
 make %{_smp_mflags}
@@ -149,18 +152,18 @@ chmod +x /etc/profile.d/vespa.sh
 exit 0
 
 %post
-%systemd_post vespa-configserver.service 
-%systemd_post vespa.service 
+%systemd_post vespa-configserver.service
+%systemd_post vespa.service
 
 %preun
 %systemd_preun vespa.service
 %systemd_preun vespa-configserver.service
 
 %postun
-%systemd_postun_with_restart vespa.service 
-%systemd_postun_with_restart vespa-configserver.service 
+%systemd_postun_with_restart vespa.service
+%systemd_postun_with_restart vespa-configserver.service
 rm -f /etc/profile.d/vespa.sh
-userdel vespa 
+userdel vespa
 
 %files
 %defattr(-,vespa,vespa,-)

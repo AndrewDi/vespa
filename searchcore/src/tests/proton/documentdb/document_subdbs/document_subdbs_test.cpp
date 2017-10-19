@@ -1,5 +1,6 @@
 // Copyright 2017 Yahoo Holdings. Licensed under the terms of the Apache 2.0 license. See LICENSE in the project root.
 
+#include <vespa/persistence/spi/test.h>
 #include <vespa/searchcore/proton/attribute/imported_attributes_repo.h>
 #include <vespa/searchcore/proton/bucketdb/bucketdbhandler.h>
 #include <vespa/searchcore/proton/common/hw_info.h>
@@ -51,6 +52,7 @@ using search::test::DirectoryHandler;
 using searchcorespi::IFlushTarget;
 using searchcorespi::index::IThreadingService;
 using storage::spi::Timestamp;
+using storage::spi::test::makeBucketSpace;
 using vespa::config::search::core::ProtonConfig;
 using vespalib::mkdir;
 
@@ -78,6 +80,7 @@ struct MySubDBOwner : public IDocumentSubDBOwner
     uint32_t _syncCnt;
     MySubDBOwner() : _syncCnt(0) {}
     void syncFeedView() override { ++_syncCnt; }
+    document::BucketSpace getBucketSpace() const override { return makeBucketSpace(); }
     vespalib::string getName() const override { return "owner"; }
     uint32_t getDistributionKey() const override { return -1; }
 };
@@ -262,25 +265,26 @@ struct MyConfigSnapshot
     Schema _schema;
     DocBuilder _builder;
     DocumentDBConfig::SP _cfg;
+    BootstrapConfig::SP  _bootstrap;
     MyConfigSnapshot(const Schema &schema,
                      const vespalib::string &cfgDir)
         : _schema(schema),
           _builder(_schema),
-          _cfg()
+          _cfg(),
+          _bootstrap()
     {
         DocumentDBConfig::DocumenttypesConfigSP documenttypesConfig
             (new DocumenttypesConfig(_builder.getDocumenttypesConfig()));
         TuneFileDocumentDB::SP tuneFileDocumentDB(new TuneFileDocumentDB());
-        BootstrapConfig::SP bootstrap
-            (new BootstrapConfig(1,
+        _bootstrap = std::make_shared<BootstrapConfig>(1,
                                  documenttypesConfig,
                                  _builder.getDocumentTypeRepo(),
                                  std::make_shared<ProtonConfig>(),
                                  std::make_shared<FiledistributorrpcConfig>(),
-                                 tuneFileDocumentDB));
+                                 tuneFileDocumentDB);
         config::DirSpec spec(cfgDir);
         DocumentDBConfigHelper mgr(spec, "searchdocument");
-        mgr.forwardConfig(bootstrap);
+        mgr.forwardConfig(_bootstrap);
         mgr.nextGeneration(1);
         _cfg = mgr.getConfig();
     }
@@ -292,8 +296,8 @@ struct FixtureBase
     ExecutorThreadingService _writeService;
     ThreadStackExecutor _summaryExecutor;
     typename Traits::Config _cfg;
-        std::shared_ptr<BucketDBOwner> _bucketDB;
-        BucketDBHandler _bucketDBHandler;
+    std::shared_ptr<BucketDBOwner> _bucketDB;
+    BucketDBHandler _bucketDBHandler;
     typename Traits::Context _ctx;
     typename Traits::Schema _baseSchema;
     MyConfigSnapshot::UP _snapshot;
@@ -329,7 +333,6 @@ struct FixtureBase
                 DocumentSubDbInitializer::SP task =
                     _subDb.createInitializer(*_snapshot->_cfg,
                                              Traits::configSerial(),
-                                             ProtonConfig::Summary(),
                                              ProtonConfig::Index());
                 vespalib::ThreadStackExecutor executor(1, 1024 * 1024);
                 initializer::TaskRunner taskRunner(executor);
@@ -340,26 +343,18 @@ struct FixtureBase
     void basicReconfig(SerialNum serialNum) {
         runInMaster([&] () { performReconfig(serialNum, TwoAttrSchema(), ConfigDir2::dir()); });
     }
-    void reconfig(SerialNum serialNum,
-                  const Schema &reconfigSchema,
-                  const vespalib::string &reconfigConfigDir) {
+    void reconfig(SerialNum serialNum, const Schema &reconfigSchema, const vespalib::string &reconfigConfigDir) {
         runInMaster([&] () { performReconfig(serialNum, reconfigSchema, reconfigConfigDir); });
-        }
-    void performReconfig(SerialNum serialNum,
-                  const Schema &reconfigSchema,
-                  const vespalib::string &reconfigConfigDir) {
+    }
+    void performReconfig(SerialNum serialNum, const Schema &reconfigSchema, const vespalib::string &reconfigConfigDir) {
         MyConfigSnapshot::UP newCfg(new MyConfigSnapshot(reconfigSchema, reconfigConfigDir));
         DocumentDBConfig::ComparisonResult cmpResult;
         cmpResult.attributesChanged = true;
         cmpResult.documenttypesChanged = true;
         cmpResult.documentTypeRepoChanged = true;
         MyDocumentDBReferenceResolver resolver;
-        IReprocessingTask::List tasks =
-                _subDb.applyConfig(*newCfg->_cfg,
-                        *_snapshot->_cfg,
-                        serialNum,
-                        ReconfigParams(cmpResult),
-                        resolver);
+        auto tasks = _subDb.applyConfig(*newCfg->_cfg, *_snapshot->_cfg,
+                                        serialNum, ReconfigParams(cmpResult), resolver);
         _snapshot = std::move(newCfg);
         if (!tasks.empty()) {
             ReprocessingRunner runner;
@@ -750,18 +745,15 @@ struct DocumentHandler
         op.setSerialNum(serialNum);
         return op;
     }
-    MoveOperation createMove(Document::UP doc, Timestamp timestamp,
-                             DbDocumentId sourceDbdId,
-                             uint32_t targetSubDbId,
-                             SerialNum serialNum)
+    MoveOperation createMove(Document::UP doc, Timestamp timestamp, DbDocumentId sourceDbdId,
+                             uint32_t targetSubDbId, SerialNum serialNum)
     {
         proton::test::Document testDoc(Document::SP(doc.release()), 0, timestamp);
         MoveOperation op(testDoc.getBucket(), testDoc.getTimestamp(), testDoc.getDoc(), sourceDbdId, targetSubDbId);
         op.setSerialNum(serialNum);
         return op;
     }
-    RemoveOperation createRemove(const DocumentId &docId, Timestamp timestamp,
-                                 SerialNum serialNum)
+    RemoveOperation createRemove(const DocumentId &docId, Timestamp timestamp, SerialNum serialNum)
     {
         const document::GlobalId &gid = docId.getGlobalId();
         BucketId bucket = gid.convertToBucketId();
@@ -774,7 +766,7 @@ struct DocumentHandler
     void putDoc(PutOperation &op) {
         IFeedView::SP feedView = _f._subDb.getFeedView();
         _f.runInMaster([&]() {    feedView->preparePut(op);
-                                  feedView->handlePut(NULL, op); } );
+                                  feedView->handlePut(FeedToken(), op); } );
     }
     void moveDoc(MoveOperation &op) {
         IFeedView::SP feedView = _f._subDb.getFeedView();
@@ -784,11 +776,10 @@ struct DocumentHandler
     {
         IFeedView::SP feedView = _f._subDb.getFeedView();
         _f.runInMaster([&]() {    feedView->prepareRemove(op);
-                                  feedView->handleRemove(NULL, op); } );
+                                  feedView->handleRemove(FeedToken(), op); } );
     }
     void putDocs() {
-        PutOperation putOp = createPut(std::move(createDoc(1, 22, 33)),
-                                       Timestamp(10), 10);
+        PutOperation putOp = createPut(std::move(createDoc(1, 22, 33)), Timestamp(10), 10);
         putDoc(putOp);
         putOp = createPut(std::move(createDoc(2, 44, 55)), Timestamp(20), 20);
         putDoc(putOp);
@@ -796,13 +787,8 @@ struct DocumentHandler
 };
 
 void
-assertAttribute(const AttributeGuard &attr,
-                const vespalib::string &name,
-                uint32_t numDocs,
-                int64_t doc1Value,
-                int64_t doc2Value,
-                SerialNum createSerialNum,
-                SerialNum lastSerialNum)
+assertAttribute(const AttributeGuard &attr, const vespalib::string &name, uint32_t numDocs,
+                int64_t doc1Value, int64_t doc2Value, SerialNum createSerialNum, SerialNum lastSerialNum)
 {
     EXPECT_EQUAL(name, attr->getName());
     EXPECT_EQUAL(numDocs, attr->getNumDocs());
@@ -813,17 +799,13 @@ assertAttribute(const AttributeGuard &attr,
 }
 
 void
-assertAttribute1(const AttributeGuard &attr,
-                           SerialNum createSerialNum,
-                           SerialNum lastSerialNum)
+assertAttribute1(const AttributeGuard &attr, SerialNum createSerialNum, SerialNum lastSerialNum)
 {
     assertAttribute(attr, "attr1", 3, 22, 44, createSerialNum, lastSerialNum);
 }
 
 void
-assertAttribute2(const AttributeGuard &attr,
-                           SerialNum createSerialNum,
-                           SerialNum lastSerialNum)
+assertAttribute2(const AttributeGuard &attr, SerialNum createSerialNum, SerialNum lastSerialNum)
 {
     assertAttribute(attr, "attr2", 3, 33, 55, createSerialNum, lastSerialNum);
 }
@@ -882,12 +864,10 @@ TEST_F("require that regular attributes are populated during reprocessing",
     requireThatAttributesArePopulatedDuringReprocessing<SearchableFixtureTwoField, ConfigDir2>(f);
 }
 
-namespace
-{
+namespace {
 
 bool
-assertOperation(DocumentOperation &op,
-                uint32_t expPrevSubDbId, uint32_t expPrevLid,
+assertOperation(DocumentOperation &op, uint32_t expPrevSubDbId, uint32_t expPrevLid,
                 uint32_t expSubDbId, uint32_t expLid)
 {
     if (!EXPECT_EQUAL(expPrevSubDbId, op.getPrevSubDbId())) {

@@ -56,6 +56,11 @@ public class SearchNode extends AbstractService implements
     private TransactionLogServer tls;
     private AbstractService serviceLayerService;
     private final Optional<Tuning> tuning;
+    private static final int RPC_PORT = 0;
+    private static final int FS4_PORT = 1;
+    private static final int FUTURE_HEALTH_PORT = 2;
+    private static final int UNUSED_3 = 3;
+    private static final int HEALTH_PORT = 4;
 
     public static class Builder extends VespaDomBuilder.DomConfigProducerBuilder<SearchNode> {
 
@@ -101,11 +106,11 @@ public class SearchNode extends AbstractService implements
         this.nodeSpec = nodeSpec;
         this.clusterName = clusterName;
         this.flushOnShutdown = flushOnShutdown;
-        portsMeta.on(0).tag("rpc").tag("rtc").tag("admin").tag("status");
-        portsMeta.on(1).tag("fs4");
-        portsMeta.on(2).tag("srmp").tag("hack").tag("test");
-        portsMeta.on(3).tag("rpc").tag("engines-provider");
-        portsMeta.on(4).tag("http").tag("json").tag("health").tag("state");
+        portsMeta.on(RPC_PORT).tag("rpc").tag("rtc").tag("admin").tag("status");
+        portsMeta.on(FS4_PORT).tag("fs4");
+        portsMeta.on(FUTURE_HEALTH_PORT).tag("unused");
+        portsMeta.on(UNUSED_3).tag("unused");
+        portsMeta.on(HEALTH_PORT).tag("http").tag("json").tag("health").tag("state");
         // Properties are set in DomSearchBuilder
         monitorService();
         this.tuning = tuning;
@@ -139,15 +144,6 @@ public class SearchNode extends AbstractService implements
     }
 
     /**
-     * Returns the connection spec string that resolves to this search node.
-     *
-     * @return The connection string.
-     */
-    public String getConnectSpec() {
-        return "tcp/" + getHost().getHostName() + ":" + getRpcPort();
-    }
-
-    /**
      * Returns the number of ports needed by this service.
      *
      * @return The number of ports.
@@ -163,20 +159,7 @@ public class SearchNode extends AbstractService implements
      * @return The port.
      */
     public int getRpcPort() {
-        return getRelativePort(0);
-    }
-
-    protected int getSlimeMessagingPort() {
-        return getRelativePort(2);
-    }
-
-    /*
-     * Returns the rpc port used for the engines provider interface.
-     * @return The port
-     */
-
-    public int getPersistenceProviderRpcPort() {
-        return getRelativePort(3);
+        return getRelativePort(RPC_PORT);
     }
 
     @Override
@@ -204,11 +187,11 @@ public class SearchNode extends AbstractService implements
     }
 
     public int getDispatchPort() {
-        return getRelativePort(1);
+        return getRelativePort(FS4_PORT);
     }
 
     public int getHttpPort() {
-        return getRelativePort(4);
+        return getRelativePort(HEALTH_PORT);
     }
 
     @Override
@@ -258,8 +241,6 @@ public class SearchNode extends AbstractService implements
         builder.
             ptport(getDispatchPort()).
             rpcport(getRpcPort()).
-            slime_messaging_port(getSlimeMessagingPort()).
-            rtcspec(getConnectSpec()).
             httpport(getHttpPort()).
             partition(getNodeSpec().partitionId()).
             clustername(getClusterName()).

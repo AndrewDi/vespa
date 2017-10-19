@@ -11,8 +11,6 @@ vespa_add_library(documentapi_documentapipolicies OBJECT
     externpolicy.cpp
     localservicepolicy.cpp
     roundrobinpolicy.cpp
-    searchcolumnpolicy.cpp
-    searchrowpolicy.cpp
     subsetservicepolicy.cpp
     loadbalancer.cpp
     loadbalancerpolicy.cpp
@@ -20,4 +18,4 @@ vespa_add_library(documentapi_documentapipolicies OBJECT
     DEPENDS
 )
 vespa_generate_config(documentapi_documentapipolicies ../../../../main/resources/configdefinitions/documentrouteselectorpolicy.def)
-install(FILES ../../../../main/resources/configdefinitions/documentrouteselectorpolicy.def RENAME documentapi.messagebus.protocol.documentrouteselectorpolicy.def DESTINATION var/db/vespa/config_server/serverdb/classes)
+install_config_definition(../../../../main/resources/configdefinitions/documentrouteselectorpolicy.def documentapi.messagebus.protocol.documentrouteselectorpolicy.def)

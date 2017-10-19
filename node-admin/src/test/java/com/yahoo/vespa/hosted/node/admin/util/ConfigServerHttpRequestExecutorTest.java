@@ -78,13 +78,27 @@ public class ConfigServerHttpRequestExecutorTest {
         assertLogStringContainsGETForAHost();
     }
 
-    @Test
-    public void testBasicFailureWithNoRetries() throws Exception {
+    @Test(expected = HttpException.class)
+    public void testBasicFailure() throws Exception {
         Set<String> configServers = new ArraySet<>(2);
         configServers.add("host1");
         configServers.add("host2");
         // Server is returning 400, no retries.
         mockReturnCode = 400;
+        ConfigServerHttpRequestExecutor executor = new ConfigServerHttpRequestExecutor(configServers, createClientMock());
+
+        TestPojo testPojo = executor.get("/path", 666, TestPojo.class);
+        assertEquals(testPojo.errorCode.intValue(), mockReturnCode);
+        assertLogStringContainsGETForAHost();
+    }
+
+    @Test
+    public void testBasicSuccessWithNoRetries() throws Exception {
+        Set<String> configServers = new ArraySet<>(2);
+        configServers.add("host1");
+        configServers.add("host2");
+        // Server is returning 201, no retries.
+        mockReturnCode = 201;
         ConfigServerHttpRequestExecutor executor = new ConfigServerHttpRequestExecutor(configServers, createClientMock());
 
         TestPojo testPojo = executor.get("/path", 666, TestPojo.class);
@@ -99,7 +113,8 @@ public class ConfigServerHttpRequestExecutorTest {
         configServers.add("host2");
         // Client is throwing exception, should be retries.
         mockReturnCode = 100000;
-        ConfigServerHttpRequestExecutor executor = new ConfigServerHttpRequestExecutor(configServers, createClientMock());
+        ConfigServerHttpRequestExecutor executor =
+                new ConfigServerHttpRequestExecutor(configServers, createClientMock());
         try {
             executor.get("/path", 666, TestPojo.class);
             fail("Expected failure");
@@ -113,6 +128,28 @@ public class ConfigServerHttpRequestExecutorTest {
     }
 
     @Test
+    public void testRetriesOnBadHttpResponseCode() throws Exception {
+        Set<String> configServers = new ArraySet<>(2);
+        configServers.add("host1");
+        configServers.add("host2");
+        // Client is throwing exception, should be retries.
+        mockReturnCode = 503;
+        ConfigServerHttpRequestExecutor executor =
+                new ConfigServerHttpRequestExecutor(configServers, createClientMock());
+        try {
+            executor.get("/path", 666, TestPojo.class);
+            fail("Expected failure");
+        } catch (Exception e) {
+            // ignore
+        }
+
+        String[] log = mockLog.toString().split("  ");
+        assertThat(log, arrayContainingInAnyOrder(
+                "GET http://host1:666/path", "GET http://host2:666/path",
+                "GET http://host1:666/path", "GET http://host2:666/path"));
+    }
+
+    @Test
     public void testNotFound() throws Exception {
         Set<String> configServers = new ArraySet<>(2);
         configServers.add("host1");
@@ -123,9 +160,22 @@ public class ConfigServerHttpRequestExecutorTest {
         try {
             executor.get("/path", 666, TestPojo.class);
             fail("Expected exception");
-        } catch (ConfigServerHttpRequestExecutor.NotFoundException e) {
+        } catch (HttpException.NotFoundException e) {
             // ignore
         }
+        assertLogStringContainsGETForAHost();
+    }
+
+    @Test
+    public void testConflict() throws Exception {
+        Set<String> configServers = new ArraySet<>(2);
+        configServers.add("host1");
+        configServers.add("host2");
+        // Server is returning 409, no exception is thrown.
+        mockReturnCode = 409;
+        ConfigServerHttpRequestExecutor executor =
+                new ConfigServerHttpRequestExecutor(configServers, createClientMock());
+        executor.get("/path", 666, TestPojo.class);
         assertLogStringContainsGETForAHost();
     }
 

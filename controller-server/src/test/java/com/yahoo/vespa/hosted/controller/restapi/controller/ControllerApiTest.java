@@ -17,7 +17,7 @@ public class ControllerApiTest extends ControllerContainerTest {
     private final static String responseFiles = "src/test/java/com/yahoo/vespa/hosted/controller/restapi/controller/responses/";
 
     @Test
-    public void testControllerApi() throws IOException {
+    public void testControllerApi() throws Exception {
         ContainerControllerTester tester = new ContainerControllerTester(container, responseFiles);
 
         tester.assertResponse(new Request("http://localhost:8080/controller/v1/"), new File("root.json"));
@@ -35,6 +35,40 @@ public class ControllerApiTest extends ControllerContainerTest {
                                    new byte[0], Request.Method.DELETE),
                        200,
                        "{\"message\":\"Re-activated job 'DeploymentExpirer'\"}");
+    }
+
+    @Test
+    public void testUpgraderApi() throws Exception {
+        ContainerControllerTester tester = new ContainerControllerTester(container, responseFiles);
+
+        // Get current configuration
+        tester.assertResponse(new Request("http://localhost:8080/controller/v1/jobs/upgrader"),
+                              "{\"upgradesPerMinute\":0.5,\"ignoreConfidence\":false}",
+                              200);
+
+        // Set invalid configuration
+        tester.assertResponse(new Request("http://localhost:8080/controller/v1/jobs/upgrader",
+                                          "{\"upgradesPerMinute\":-1}", Request.Method.PATCH),
+                              "{\"error-code\":\"BAD_REQUEST\",\"message\":\"Upgrades per minute must be >= 0\"}",
+                              400);
+
+        // Unrecognized field
+        tester.assertResponse(new Request("http://localhost:8080/controller/v1/jobs/upgrader",
+                                          "{\"foo\":bar}", Request.Method.PATCH),
+                              "{\"error-code\":\"BAD_REQUEST\",\"message\":\"Unable to configure upgrader with data in request: '{\\\"foo\\\":bar}'\"}",
+                              + 400);
+
+        // Patch configuration
+        tester.assertResponse(new Request("http://localhost:8080/controller/v1/jobs/upgrader",
+                                          "{\"upgradesPerMinute\":42.0}", Request.Method.PATCH),
+                              "{\"upgradesPerMinute\":42.0,\"ignoreConfidence\":false}",
+                              200);
+
+        // Patch configuration
+        tester.assertResponse(new Request("http://localhost:8080/controller/v1/jobs/upgrader",
+                                          "{\"ignoreConfidence\":true}", Request.Method.PATCH),
+                              "{\"upgradesPerMinute\":42.0,\"ignoreConfidence\":true}",
+                              200);
     }
 
 }

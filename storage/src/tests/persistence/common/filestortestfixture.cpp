@@ -4,7 +4,12 @@
 #include <vespa/storage/persistence/filestorage/filestormanager.h>
 #include <vespa/persistence/dummyimpl/dummypersistence.h>
 #include <tests/persistence/common/filestortestfixture.h>
+#include <tests/common/make_document_bucket.h>
+#include <vespa/persistence/spi/test.h>
 #include <sstream>
+
+using storage::spi::test::makeBucket;
+using storage::test::makeDocumentBucket;
 
 namespace storage {
 
@@ -50,7 +55,7 @@ FileStorTestFixture::createBucket(const document::BucketId& bid)
     spi::Context context(defaultLoadType, spi::Priority(0),
                          spi::Trace::TraceLevel(0));
     _node->getPersistenceProvider().createBucket(
-            spi::Bucket(bid, spi::PartitionId(0)), context);
+            makeBucket(bid), context);
 
     StorBucketDatabase::WrappedEntry entry(
             _node->getStorageBucketDatabase().get(bid, "foo",
@@ -96,7 +101,7 @@ FileStorTestFixture::TestFileStorComponents::sendDummyGet(
     std::ostringstream id;
     id << "id:foo:testdoctype1:n=" << bid.getId() << ":0";
     std::shared_ptr<api::GetCommand> cmd(
-            new api::GetCommand(bid, document::DocumentId(id.str()), "[all]"));
+            new api::GetCommand(makeDocumentBucket(bid), document::DocumentId(id.str()), "[all]"));
     cmd->setAddress(makeSelfAddress());
     cmd->setPriority(255);
     top.sendDown(cmd);
@@ -110,7 +115,7 @@ FileStorTestFixture::TestFileStorComponents::sendDummyGetDiff(
     nodes.push_back(0);
     nodes.push_back(1);
     std::shared_ptr<api::GetBucketDiffCommand> cmd(
-            new api::GetBucketDiffCommand(bid, nodes, 12345));
+            new api::GetBucketDiffCommand(makeDocumentBucket(bid), nodes, 12345));
     cmd->setAddress(makeSelfAddress());
     cmd->setPriority(255);
     top.sendDown(cmd);
@@ -127,7 +132,7 @@ FileStorTestFixture::TestFileStorComponents::sendPut(
     document::Document::SP doc(
             _fixture._node->getTestDocMan().createDocument("foobar", id.str()));
     std::shared_ptr<api::PutCommand> cmd(
-            new api::PutCommand(bid, doc, timestamp));
+            new api::PutCommand(makeDocumentBucket(bid), doc, timestamp));
     cmd->setAddress(makeSelfAddress());
     top.sendDown(cmd);
 }

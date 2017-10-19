@@ -1,18 +1,23 @@
 // Copyright 2017 Yahoo Holdings. Licensed under the terms of the Apache 2.0 license. See LICENSE in the project root.
-#include <vespa/document/repo/documenttyperepo.h>
+
+#include <vespa/config-stor-distribution.h>
 #include <vespa/document/datatype/documenttype.h>
+#include <vespa/document/fieldset/fieldsets.h>
+#include <vespa/document/repo/documenttyperepo.h>
 #include <vespa/persistence/spi/documentselection.h>
+#include <vespa/persistence/spi/test.h>
+#include <vespa/persistence/spi/test.h>
 #include <vespa/searchcore/proton/persistenceengine/bucket_guard.h>
 #include <vespa/searchcore/proton/persistenceengine/ipersistenceengineowner.h>
 #include <vespa/searchcore/proton/persistenceengine/persistenceengine.h>
-#include <vespa/vespalib/testkit/testapp.h>
-#include <vespa/document/fieldset/fieldsets.h>
 #include <vespa/vdslib/distribution/distribution.h>
 #include <vespa/vdslib/state/clusterstate.h>
-#include <vespa/config-stor-distribution.h>
+#include <vespa/vespalib/testkit/testapp.h>
+#include <algorithm>
 #include <set>
 
 using document::BucketId;
+using document::BucketSpace;
 using document::Document;
 using document::DocumentId;
 using document::DocumentType;
@@ -22,19 +27,22 @@ using storage::spi::BucketChecksum;
 using storage::spi::BucketIdListResult;
 using storage::spi::BucketInfo;
 using storage::spi::BucketInfoResult;
-using storage::spi::Context;
 using storage::spi::ClusterState;
+using storage::spi::Context;
 using storage::spi::CreateIteratorResult;
 using storage::spi::DocumentSelection;
 using storage::spi::GetResult;
-using storage::spi::IteratorId;
 using storage::spi::IterateResult;
+using storage::spi::IteratorId;
 using storage::spi::PartitionId;
+using storage::spi::PersistenceProvider;
 using storage::spi::RemoveResult;
 using storage::spi::Result;
 using storage::spi::Selection;
 using storage::spi::Timestamp;
 using storage::spi::UpdateResult;
+using storage::spi::test::makeBucket;
+using storage::spi::test::makeBucketSpace;
 using namespace proton;
 using namespace vespalib;
 
@@ -119,33 +127,29 @@ struct MyDocumentRetriever : DocumentRetrieverBaseForTest {
 
     MyDocumentRetriever(const Document *d, Timestamp ts, DocumentId &last_id)
         : repo(), document(d), timestamp(ts), last_doc_id(last_id) {}
-    virtual const document::DocumentTypeRepo &getDocumentTypeRepo() const override {
+    const document::DocumentTypeRepo &getDocumentTypeRepo() const override {
         return repo;
     }
-    virtual void getBucketMetaData(const storage::spi::Bucket &,
-                                   search::DocumentMetaData::Vector &v) const override {
+    void getBucketMetaData(const storage::spi::Bucket &, search::DocumentMetaData::Vector &v) const override {
         if (document != 0) {
             v.push_back(getDocumentMetaData(document->getId()));
         }
     }
-    virtual DocumentMetaData getDocumentMetaData(const DocumentId &id) const override {
+    DocumentMetaData getDocumentMetaData(const DocumentId &id) const override {
         last_doc_id = id;
         if (document != 0) {
-            return DocumentMetaData(1, timestamp, document::BucketId(1),
-                                    document->getId().getGlobalId());
+            return DocumentMetaData(1, timestamp, document::BucketId(1), document->getId().getGlobalId());
         }
         return DocumentMetaData();
     }
-    virtual document::Document::UP getDocument(search::DocumentIdT) const override {
+    document::Document::UP getDocument(search::DocumentIdT) const override {
         if (document != 0) {
             return Document::UP(document->clone());
         }
         return Document::UP();
     }
 
-    virtual CachedSelect::SP
-    parseSelect(const vespalib::string &) const override
-    {
+    CachedSelect::SP parseSelect(const vespalib::string &) const override {
         return CachedSelect::SP();
     }
 };
@@ -200,134 +204,104 @@ struct MyHandler : public IPersistenceHandler, IBucketFreezer {
         setExistingTimestamp(ts);
     }
     void handle(FeedToken token, const Bucket &bucket, Timestamp timestamp, const DocumentId &docId) {
+        (void) token;
         lastBucket = bucket;
         lastTimestamp = timestamp;
         lastDocId = docId;
-        token.ack();
     }
 
-    virtual void initialize() override { initialized = true; }
+    void initialize() override { initialized = true; }
 
-    virtual void handlePut(FeedToken token, const Bucket& bucket,
-                           Timestamp timestamp, const document::Document::SP& doc) override {
-        token.setResult(ResultUP(new storage::spi::Result()), false);
+    void handlePut(FeedToken token, const Bucket& bucket,
+                   Timestamp timestamp, const document::Document::SP& doc) override {
+        token->setResult(ResultUP(new storage::spi::Result()), false);
         handle(token, bucket, timestamp, doc->getId());
     }
 
-    virtual void handleUpdate(FeedToken token, const Bucket& bucket,
-                              Timestamp timestamp, const document::DocumentUpdate::SP& upd) override {
-        token.setResult(ResultUP(new storage::spi::UpdateResult(existingTimestamp)),
+    void handleUpdate(FeedToken token, const Bucket& bucket,
+                      Timestamp timestamp, const document::DocumentUpdate::SP& upd) override {
+        token->setResult(ResultUP(new storage::spi::UpdateResult(existingTimestamp)),
                         existingTimestamp > 0);
         handle(token, bucket, timestamp, upd->getId());
     }
 
-    virtual void handleRemove(FeedToken token, const Bucket& bucket,
-                              Timestamp timestamp, const DocumentId& id) override {
+    void handleRemove(FeedToken token, const Bucket& bucket,
+                      Timestamp timestamp, const DocumentId& id) override {
         bool wasFound = existingTimestamp > 0;
-        token.setResult(ResultUP(new storage::spi::RemoveResult(wasFound)), wasFound);
+        token->setResult(ResultUP(new storage::spi::RemoveResult(wasFound)), wasFound);
         handle(token, bucket, timestamp, id);
     }
 
-    virtual void handleListBuckets(IBucketIdListResultHandler &resultHandler) override {
+    void handleListBuckets(IBucketIdListResultHandler &resultHandler) override {
         resultHandler.handle(BucketIdListResult(bucketList));
     }
 
-    virtual void handleSetClusterState(const ClusterState &calc,
-                                       IGenericResultHandler &resultHandler) override {
+    void handleSetClusterState(const ClusterState &calc, IGenericResultHandler &resultHandler) override {
         lastCalc = &calc;
         resultHandler.handle(Result());
     }
 
-    virtual void handleSetActiveState(const Bucket &bucket,
-                                       storage::spi::BucketInfo::ActiveState newState,
-                                       IGenericResultHandler &resultHandler) override {
+    void handleSetActiveState(const Bucket &bucket, storage::spi::BucketInfo::ActiveState newState,
+                              IGenericResultHandler &resultHandler) override {
         lastBucket = bucket;
         lastBucketState = newState;
         resultHandler.handle(bucketStateResult);
     }
 
-    virtual void handleGetBucketInfo(const Bucket &,
-                                     IBucketInfoResultHandler &resultHandler) override {
+    void handleGetBucketInfo(const Bucket &, IBucketInfoResultHandler &resultHandler) override {
         resultHandler.handle(BucketInfoResult(bucketInfo));
     }
 
-    virtual void
-    handleCreateBucket(FeedToken token,
-                       const storage::spi::Bucket &) override
-    {
-        token.setResult(ResultUP(new Result(_createBucketResult)), true);
-        token.ack();
+    void handleCreateBucket(FeedToken token, const storage::spi::Bucket &) override {
+        token->setResult(ResultUP(new Result(_createBucketResult)), true);
     }
 
-    virtual void handleDeleteBucket(FeedToken token,
-                                    const storage::spi::Bucket &) override {
-        token.setResult(ResultUP(new Result(deleteBucketResult)), true);
-        token.ack();
+    void handleDeleteBucket(FeedToken token, const storage::spi::Bucket &) override {
+        token->setResult(ResultUP(new Result(deleteBucketResult)), true);
     }
 
-    virtual void handleGetModifiedBuckets(IBucketIdListResultHandler &resultHandler) override {
+    void handleGetModifiedBuckets(IBucketIdListResultHandler &resultHandler) override {
         resultHandler.handle(BucketIdListResult(modBucketList));
     }
 
-    virtual void
-    handleSplit(FeedToken token,
-                const storage::spi::Bucket &source,
-                const storage::spi::Bucket &target1,
-                const storage::spi::Bucket &target2) override
+    void handleSplit(FeedToken token, const storage::spi::Bucket &, const storage::spi::Bucket &,
+                     const storage::spi::Bucket &) override
     {
-        (void) source;
-        (void) target1;
-        (void) target2;
-        token.setResult(ResultUP(new Result(_splitResult)), true);
-        token.ack();
+        token->setResult(ResultUP(new Result(_splitResult)), true);
     }
 
-    virtual void
-    handleJoin(FeedToken token,
-               const storage::spi::Bucket &source1,
-               const storage::spi::Bucket &source2,
-               const storage::spi::Bucket &target) override
+    void handleJoin(FeedToken token, const storage::spi::Bucket &, const storage::spi::Bucket &,
+               const storage::spi::Bucket &) override
     {
-        (void) source1;
-        (void) source2;
-        (void) target;
-        token.setResult(ResultUP(new Result(_joinResult)), true);
-        token.ack();
+        token->setResult(ResultUP(new Result(_joinResult)), true);
     }
 
-    virtual RetrieversSP getDocumentRetrievers(storage::spi::ReadConsistency) override {
+    RetrieversSP getDocumentRetrievers(storage::spi::ReadConsistency) override {
         RetrieversSP ret(new std::vector<IDocumentRetriever::SP>);
-        ret->push_back(IDocumentRetriever::SP(new MyDocumentRetriever(
-                                0, Timestamp(), lastDocId)));
-        ret->push_back(IDocumentRetriever::SP(new MyDocumentRetriever(
-                                document, existingTimestamp, lastDocId)));
+        ret->push_back(IDocumentRetriever::SP(new MyDocumentRetriever(0, Timestamp(), lastDocId)));
+        ret->push_back(IDocumentRetriever::SP(new MyDocumentRetriever(document, existingTimestamp, lastDocId)));
         return ret;
     }
 
-    virtual BucketGuard::UP lockBucket(const storage::spi::Bucket &b) override {
+    BucketGuard::UP lockBucket(const storage::spi::Bucket &b) override {
         return BucketGuard::UP(new BucketGuard(b.getBucketId(), *this));
     }
 
-    virtual void
-    handleListActiveBuckets(IBucketIdListResultHandler &resultHandler) override
-    {
+    void handleListActiveBuckets(IBucketIdListResultHandler &resultHandler) override {
         BucketIdListResult::List list;
         resultHandler.handle(BucketIdListResult(list));
     }
 
-    virtual void
-    handlePopulateActiveBuckets(document::BucketId::List &buckets,
-                                IGenericResultHandler &resultHandler) override
-    {
+    void handlePopulateActiveBuckets(document::BucketId::List &buckets, IGenericResultHandler &resultHandler) override {
         (void) buckets;
         resultHandler.handle(Result());
     }
 
-    virtual void freezeBucket(BucketId bucket) override {
+    void freezeBucket(BucketId bucket) override {
         frozen.insert(bucket.getId());
         was_frozen.insert(bucket.getId());
     }
-    virtual void thawBucket(BucketId bucket) override {
+    void thawBucket(BucketId bucket) override {
         std::multiset<uint64_t>::iterator it = frozen.find(bucket.getId());
         ASSERT_TRUE(it != frozen.end());
         frozen.erase(it);
@@ -349,6 +323,8 @@ struct HandlerSet {
     MyHandler              &handler2;
     HandlerSet();
     ~HandlerSet();
+    void prepareListBuckets();
+    void prepareGetModifiedBuckets();
 };
 
 HandlerSet::HandlerSet()
@@ -378,8 +354,8 @@ BucketId bckId1(1);
 BucketId bckId2(2);
 BucketId bckId3(3);
 Bucket bucket0;
-Bucket bucket1(bckId1, partId);
-Bucket bucket2(bckId2, partId);
+Bucket bucket1(makeBucket(bckId1, partId));
+Bucket bucket2(makeBucket(bckId2, partId));
 BucketChecksum checksum1(1);
 BucketChecksum checksum2(2);
 BucketChecksum checksum3(1+2);
@@ -392,15 +368,30 @@ Timestamp tstamp2(2);
 Timestamp tstamp3(3);
 DocumentSelection doc_sel("");
 Selection selection(doc_sel);
+BucketSpace altBucketSpace(1);
 
+
+void
+HandlerSet::prepareListBuckets()
+{
+    handler1.bucketList.push_back(bckId1);
+    handler1.bucketList.push_back(bckId2);
+    handler2.bucketList.push_back(bckId2);
+    handler2.bucketList.push_back(bckId3);
+}
+
+void
+HandlerSet::prepareGetModifiedBuckets()
+{
+    handler1.modBucketList.push_back(bckId1);
+    handler1.modBucketList.push_back(bckId2);
+    handler2.modBucketList.push_back(bckId2);
+    handler2.modBucketList.push_back(bckId3);
+}
 
 class SimplePersistenceEngineOwner : public IPersistenceEngineOwner
 {
-    virtual void
-    setClusterState(const storage::spi::ClusterState &calc) override
-    {
-        (void) calc;
-    }
+    void setClusterState(const storage::spi::ClusterState &calc) override { (void) calc; }
 };
 
 struct SimpleResourceWriteFilter : public IResourceWriteFilter
@@ -424,13 +415,17 @@ struct SimpleFixture {
     SimpleResourceWriteFilter _writeFilter;
     PersistenceEngine engine;
     HandlerSet hset;
-    SimpleFixture()
+    SimpleFixture(BucketSpace bucketSpace2)
         : _owner(),
           engine(_owner, _writeFilter, -1, false),
           hset()
     {
-        engine.putHandler(DocTypeName(doc1->getType()), hset.phandler1);
-        engine.putHandler(DocTypeName(doc2->getType()), hset.phandler2);
+        engine.putHandler(makeBucketSpace(), DocTypeName(doc1->getType()), hset.phandler1);
+        engine.putHandler(bucketSpace2, DocTypeName(doc2->getType()), hset.phandler2);
+    }
+    SimpleFixture()
+        : SimpleFixture(makeBucketSpace())
+    {
     }
 };
 
@@ -444,6 +439,26 @@ assertHandler(const Bucket &expBucket, Timestamp expTimestamp,
     EXPECT_EQUAL(expDocId, handler.lastDocId);
 }
 
+void assertBucketList(const BucketIdListResult &result, const std::vector<BucketId> &expBuckets)
+{
+    const BucketIdListResult::List &bucketList = result.getList();
+    EXPECT_EQUAL(expBuckets.size(), bucketList.size());
+    for (const auto &expBucket : expBuckets) {
+        EXPECT_TRUE(std::find(bucketList.begin(), bucketList.end(), expBucket) != bucketList.end());
+    }
+}
+
+void assertBucketList(PersistenceProvider &spi, BucketSpace bucketSpace, const std::vector<BucketId> &expBuckets)
+{
+    BucketIdListResult result = spi.listBuckets(bucketSpace, partId);
+    TEST_DO(assertBucketList(result, expBuckets));
+}
+
+void assertModifiedBuckets(PersistenceProvider &spi, BucketSpace bucketSpace, const std::vector<BucketId> &expBuckets)
+{
+    BucketIdListResult result = spi.getModifiedBuckets(bucketSpace);
+    TEST_DO(assertBucketList(result, expBuckets));
+}
 
 TEST_F("require that getPartitionStates() prepares all handlers", SimpleFixture)
 {
@@ -585,18 +600,9 @@ TEST_F("require that remove is NOT rejected if resource limit is reached", Simpl
 
 TEST_F("require that listBuckets() is routed to handlers and merged", SimpleFixture)
 {
-    f.hset.handler1.bucketList.push_back(bckId1);
-    f.hset.handler1.bucketList.push_back(bckId2);
-    f.hset.handler2.bucketList.push_back(bckId2);
-    f.hset.handler2.bucketList.push_back(bckId3);
-
-    EXPECT_TRUE(f.engine.listBuckets(PartitionId(1)).getList().empty());
-    BucketIdListResult result = f.engine.listBuckets(partId);
-    const BucketIdListResult::List &bucketList = result.getList();
-    EXPECT_EQUAL(3u, bucketList.size());
-    EXPECT_EQUAL(bckId1, bucketList[0]);
-    EXPECT_EQUAL(bckId2, bucketList[1]);
-    EXPECT_EQUAL(bckId3, bucketList[2]);
+    f.hset.prepareListBuckets();
+    EXPECT_TRUE(f.engine.listBuckets(makeBucketSpace(), PartitionId(1)).getList().empty());
+    TEST_DO(assertBucketList(f.engine, makeBucketSpace(), { bckId1, bckId2, bckId3 }));
 }
 
 
@@ -671,17 +677,8 @@ TEST_F("require that deleteBucket() is routed to handlers and merged", SimpleFix
 
 TEST_F("require that getModifiedBuckets() is routed to handlers and merged", SimpleFixture)
 {
-    f.hset.handler1.modBucketList.push_back(bckId1);
-    f.hset.handler1.modBucketList.push_back(bckId2);
-    f.hset.handler2.modBucketList.push_back(bckId2);
-    f.hset.handler2.modBucketList.push_back(bckId3);
-
-    BucketIdListResult result = f.engine.getModifiedBuckets();
-    const BucketIdListResult::List &bucketList = result.getList();
-    EXPECT_EQUAL(3u, bucketList.size());
-    EXPECT_EQUAL(bckId1, bucketList[0]);
-    EXPECT_EQUAL(bckId2, bucketList[1]);
-    EXPECT_EQUAL(bckId3, bucketList[2]);
+    f.hset.prepareGetModifiedBuckets();
+    TEST_DO(assertModifiedBuckets(f.engine, makeBucketSpace(), { bckId1, bckId2, bckId3 }));
 }
 
 
@@ -835,6 +832,15 @@ TEST_F("require that buckets are frozen during iterator life", SimpleFixture) {
     f.engine.destroyIterator(create_result.getIteratorId(), context);
     EXPECT_FALSE(f.hset.handler1.isFrozen(bucket1));
     EXPECT_FALSE(f.hset.handler2.isFrozen(bucket1));
+}
+
+TEST_F("require that multiple bucket spaces works", SimpleFixture(altBucketSpace)) {
+    f.hset.prepareListBuckets();
+    TEST_DO(assertBucketList(f.engine, makeBucketSpace(), { bckId1, bckId2 }));
+    TEST_DO(assertBucketList(f.engine, altBucketSpace, { bckId2, bckId3 }));
+    f.hset.prepareGetModifiedBuckets();
+    TEST_DO(assertModifiedBuckets(f.engine, makeBucketSpace(), { bckId1, bckId2 }));
+    TEST_DO(assertModifiedBuckets(f.engine, altBucketSpace, { bckId2, bckId3 }));
 }
 
 TEST_MAIN()

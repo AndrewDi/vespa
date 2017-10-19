@@ -8,8 +8,7 @@ vespa_add_library(logd STATIC
     service.cpp
     cmdbuf.cpp
     perform.cpp
-    sigterm.cpp
     DEPENDS
 )
 vespa_generate_config(logd ../main/resources/configdefinitions/logd.def)
-install(FILES ../main/resources/configdefinitions/logd.def RENAME cloud.config.log.logd.def DESTINATION var/db/vespa/config_server/serverdb/classes)
+install_config_definition(../main/resources/configdefinitions/logd.def cloud.config.log.logd.def)

@@ -1,8 +1,6 @@
 // Copyright 2017 Yahoo Holdings. Licensed under the terms of the Apache 2.0 license. See LICENSE in the project root.
-#include "filedownloadermanager.h"
 
-#include <iterator>
-#include <sstream>
+#include "filedownloadermanager.h"
 #include <thread>
 
 #include <vespa/log/log.h>
@@ -16,10 +14,10 @@ using filedistribution::Path;
 namespace {
 void logStartDownload(const std::set<std::string> & filesToDownload) {
     std::ostringstream msg;
-    msg <<"StartDownloads:" <<std::endl;
+    msg << "StartDownloads:" << std::endl;
     std::copy(filesToDownload.begin(), filesToDownload.end(),
               std::ostream_iterator<std::string>(msg, "\n"));
-    LOG(debug, msg.str().c_str());
+    LOG(debug, "%s", msg.str().c_str());
 }
 } //anonymous namespace
 

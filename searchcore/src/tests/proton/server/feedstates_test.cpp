@@ -8,7 +8,7 @@ LOG_SETUP("feedstates_test");
 #include <vespa/document/base/testdocrepo.h>
 #include <vespa/document/bucket/bucketid.h>
 #include <vespa/document/repo/documenttyperepo.h>
-#include <vespa/searchcore/proton/common/bucketfactory.h>
+#include <vespa/searchcore/proton/test/bucketfactory.h>
 #include <vespa/searchcore/proton/server/feedstates.h>
 #include <vespa/searchcore/proton/server/ireplayconfig.h>
 #include <vespa/searchcore/proton/server/memoryconfigstore.h>
@@ -40,10 +40,8 @@ struct MyFeedView : public test::DummyFeedView {
     MyFeedView();
     ~MyFeedView();
 
-    virtual const DocumentTypeRepo::SP &getDocumentTypeRepo() const override
-    { return repo_sp; }
-    virtual void handleRemove(FeedToken *, const RemoveOperation &) override
-    { ++remove_handled; }
+    const DocumentTypeRepo::SP &getDocumentTypeRepo() const override { return repo_sp; }
+    void handleRemove(FeedToken , const RemoveOperation &) override { ++remove_handled; }
 };
 
 MyFeedView::MyFeedView() : repo_sp(repo.getTypeRepoSp()), remove_handled(0) {}

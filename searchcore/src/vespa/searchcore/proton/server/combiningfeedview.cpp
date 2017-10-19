@@ -34,13 +34,15 @@ getRepo(const std::vector<IFeedView::SP> &views)
 };
 
 CombiningFeedView::CombiningFeedView(const std::vector<IFeedView::SP> &views,
+                                     document::BucketSpace bucketSpace,
                                      const IBucketStateCalculator::SP &calc)
     : _repo(getRepo(views)),
       _views(views),
       _metaStores(),
       _calc(calc),
       _clusterUp(calc.get() != NULL && calc->clusterUp()),
-      _forceReady(!_clusterUp || !hasNotReadyFeedView())
+      _forceReady(!_clusterUp || !hasNotReadyFeedView()),
+      _bucketSpace(bucketSpace)
 {
     _metaStores.reserve(views.size());
     for (const auto &view : views) {
@@ -115,19 +117,16 @@ CombiningFeedView::preparePut(PutOperation &putOp)
 }
 
 void
-CombiningFeedView::handlePut(FeedToken *token,
-                             const PutOperation &putOp)
+CombiningFeedView::handlePut(FeedToken token, const PutOperation &putOp)
 {
     assert(putOp.getValidDbdId());
     uint32_t subDbId = putOp.getSubDbId();
     uint32_t prevSubDbId = putOp.getPrevSubDbId();
     if (putOp.getValidPrevDbdId() && prevSubDbId != subDbId) {
-        if (token != NULL)
-            token->incNeededAcks();
         _views[subDbId]->handlePut(token, putOp);
-        _views[prevSubDbId]->handlePut(token, putOp);
+        _views[prevSubDbId]->handlePut(std::move(token), putOp);
     } else {
-        _views[subDbId]->handlePut(token, putOp);
+        _views[subDbId]->handlePut(std::move(token), putOp);
     }
 }
 
@@ -141,14 +140,13 @@ CombiningFeedView::prepareUpdate(UpdateOperation &updOp)
 }
 
 void
-CombiningFeedView::handleUpdate(FeedToken *token,
-                                const UpdateOperation &updOp)
+CombiningFeedView::handleUpdate(FeedToken token, const UpdateOperation &updOp)
 {
     assert(updOp.getValidDbdId());
     assert(updOp.getValidPrevDbdId());
     assert(!updOp.changedDbdId());
     uint32_t subDbId(updOp.getSubDbId());
-    _views[subDbId]->handleUpdate(token, updOp);
+    _views[subDbId]->handleUpdate(std::move(token), updOp);
 }
 
 void
@@ -163,19 +161,16 @@ CombiningFeedView::prepareRemove(RemoveOperation &rmOp)
 }
 
 void
-CombiningFeedView::handleRemove(FeedToken *token,
-                                const RemoveOperation &rmOp)
+CombiningFeedView::handleRemove(FeedToken token, const RemoveOperation &rmOp)
 {
     if (rmOp.getValidDbdId()) {
         uint32_t subDbId = rmOp.getSubDbId();
         uint32_t prevSubDbId = rmOp.getPrevSubDbId();
         if (rmOp.getValidPrevDbdId() && prevSubDbId != subDbId) {
-            if (token != NULL)
-                token->incNeededAcks();
             _views[subDbId]->handleRemove(token, rmOp);
-            _views[prevSubDbId]->handleRemove(token, rmOp);
+            _views[prevSubDbId]->handleRemove(std::move(token), rmOp);
         } else {
-            _views[subDbId]->handleRemove(token, rmOp);
+            _views[subDbId]->handleRemove(std::move(token), rmOp);
         }
     } else {
         assert(rmOp.getValidPrevDbdId());
@@ -273,17 +268,18 @@ CombiningFeedView::setCalculator(const IBucketStateCalculator::SP &newCalc)
 bool
 CombiningFeedView::shouldBeReady(const document::BucketId &bucket) const
 {
+    document::Bucket dbucket(_bucketSpace, bucket);
     LOG(debug,
         "shouldBeReady(%s): forceReady(%s), clusterUp(%s), calcReady(%s)",
         bucket.toString().c_str(),
         (_forceReady ? "true" : "false"),
         (_clusterUp ? "true" : "false"),
         (_calc.get() != NULL ?
-         (_calc->shouldBeReady(bucket) ? "true" : "false") : "null"));
+         (_calc->shouldBeReady(dbucket) ? "true" : "false") : "null"));
     const documentmetastore::IBucketHandler *readyMetaStore =
         _metaStores[getReadyFeedViewId()];
     bool isActive = readyMetaStore->getBucketDB().takeGuard()->isActiveBucket(bucket);
-    return _forceReady || isActive || _calc->shouldBeReady(bucket);
+    return _forceReady || isActive || _calc->shouldBeReady(dbucket);
 }
 
 } // namespace proton

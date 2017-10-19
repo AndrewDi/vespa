@@ -5,13 +5,21 @@ import com.yahoo.container.jdisc.HttpRequest;
 import com.yahoo.container.jdisc.HttpResponse;
 import com.yahoo.container.jdisc.LoggingRequestHandler;
 import com.yahoo.container.logging.AccessLog;
+import com.yahoo.io.IOUtils;
+import com.yahoo.slime.Inspector;
+import com.yahoo.text.Utf8;
+import com.yahoo.vespa.config.SlimeUtils;
 import com.yahoo.vespa.hosted.controller.maintenance.ControllerMaintenance;
+import com.yahoo.vespa.hosted.controller.maintenance.Upgrader;
 import com.yahoo.vespa.hosted.controller.restapi.ErrorResponse;
 import com.yahoo.vespa.hosted.controller.restapi.MessageResponse;
 import com.yahoo.vespa.hosted.controller.restapi.Path;
 import com.yahoo.vespa.hosted.controller.restapi.ResourceResponse;
 import com.yahoo.yolean.Exceptions;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.util.concurrent.Executor;
 import java.util.logging.Level;
 
@@ -21,6 +29,7 @@ import java.util.logging.Level;
  * 
  * @author bratseth
  */
+@SuppressWarnings("unused") // Created by injection
 public class ControllerApiHandler extends LoggingRequestHandler {
 
     private final ControllerMaintenance maintenance;
@@ -34,9 +43,10 @@ public class ControllerApiHandler extends LoggingRequestHandler {
     public HttpResponse handle(HttpRequest request) {
         try {
             switch (request.getMethod()) {
-                case GET: return handleGET(request);
-                case POST: return handlePOST(request);
-                case DELETE: return handleDELETE(request);
+                case GET: return get(request);
+                case POST: return post(request);
+                case DELETE: return delete(request);
+                case PATCH: return patch(request);
                 default: return ErrorResponse.methodNotAllowed("Method '" + request.getMethod() + "' is not supported");
             }
         }
@@ -49,26 +59,35 @@ public class ControllerApiHandler extends LoggingRequestHandler {
         }
     }
     
-    private HttpResponse handleGET(HttpRequest request) {
+    private HttpResponse get(HttpRequest request) {
         Path path = new Path(request.getUri().getPath());
         if (path.matches("/controller/v1/")) return root(request);
         if (path.matches("/controller/v1/maintenance/")) return new JobsResponse(maintenance.jobControl());
-        return ErrorResponse.notFoundError("Nothing at " + path);
+        if (path.matches("/controller/v1/jobs/upgrader")) return new UpgraderResponse(maintenance.upgrader());
+        return notFound(path);
     }
 
-    private HttpResponse handlePOST(HttpRequest request) {
+    private HttpResponse post(HttpRequest request) {
         Path path = new Path(request.getUri().getPath());
         if (path.matches("/controller/v1/maintenance/inactive/{jobName}")) 
             return setActive(path.get("jobName"), false);
-        return ErrorResponse.notFoundError("Nothing at " + path);
+        return notFound(path);
     }
 
-    private HttpResponse handleDELETE(HttpRequest request) {
+    private HttpResponse delete(HttpRequest request) {
         Path path = new Path(request.getUri().getPath());
         if (path.matches("/controller/v1/maintenance/inactive/{jobName}"))
             return setActive(path.get("jobName"), true);
-        return ErrorResponse.notFoundError("Nothing at " + path);
+        return notFound(path);
     }
+
+    private HttpResponse patch(HttpRequest request) {
+        Path path = new Path(request.getUri().getPath());
+        if (path.matches("/controller/v1/jobs/upgrader")) return configureUpgrader(request);
+        return notFound(path);
+    }
+
+    private HttpResponse notFound(Path path) { return ErrorResponse.notFoundError("Nothing at " + path); }
 
     private HttpResponse root(HttpRequest request) {
         return new ResourceResponse(request, "maintenance");
@@ -79,6 +98,33 @@ public class ControllerApiHandler extends LoggingRequestHandler {
             return ErrorResponse.notFoundError("No job named '" + jobName + "'");
         maintenance.jobControl().setActive(jobName, active);
         return new MessageResponse((active ? "Re-activated" : "Deactivated" ) + " job '" + jobName + "'");
+    }
+
+    private HttpResponse configureUpgrader(HttpRequest request) {
+        String upgradesPerMinuteField = "upgradesPerMinute";
+        String ignoreConfidenceField = "ignoreConfidence";
+
+        byte[] jsonBytes = toJsonBytes(request.getData());
+        Inspector inspect = SlimeUtils.jsonToSlime(jsonBytes).get();
+        Upgrader upgrader = maintenance.upgrader();
+        if (inspect.field(upgradesPerMinuteField).valid()) {
+            upgrader.setUpgradesPerMinute(inspect.field(upgradesPerMinuteField).asDouble());
+        } else if (inspect.field(ignoreConfidenceField).valid()) {
+            upgrader.ignoreConfidence(inspect.field(ignoreConfidenceField).asBool());
+        } else {
+            return ErrorResponse.badRequest("Unable to configure upgrader with data in request: '" +
+                                                    Utf8.toString(jsonBytes) + "'");
+        }
+
+        return new UpgraderResponse(maintenance.upgrader());
+    }
+
+    private byte[] toJsonBytes(InputStream jsonStream) {
+        try {
+            return IOUtils.readBytes(jsonStream, 1000 * 1000);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
 }

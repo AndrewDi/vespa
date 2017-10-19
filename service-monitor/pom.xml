@@ -37,6 +37,12 @@
         </dependency>
         <dependency>
             <groupId>com.yahoo.vespa</groupId>
+            <artifactId>jdisc_core</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.yahoo.vespa</groupId>
             <artifactId>configdefinitions</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
@@ -52,6 +58,18 @@
             <artifactId>application-model</artifactId>
             <version>${project.version}</version>
             <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.yahoo.vespa</groupId>
+            <artifactId>config-model-api</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.yahoo.vespa</groupId>
+            <artifactId>config-provisioning</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.json4s</groupId>
